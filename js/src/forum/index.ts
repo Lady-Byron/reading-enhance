@@ -25,15 +25,15 @@ function savePosition(discussionId: string, postNumber: number) {
   return app
     .request({
       method: 'POST',
-      // ✅ 使用不与 JSON:API 关系端点冲突的新路由
-      url: `${app.forum.attribute('apiUrl')}/ladybyron/reading-position/${discussionId}`,
-      body: { postNumber },
+      // ✅ 新路由：不带路径参数
+      url: `${app.forum.attribute('apiUrl')}/ladybyron/reading-position`,
+      body: { discussionId, postNumber },
     })
     .catch(() => {});
 }
 
 app.initializers.add('lady-byron/reading-enhance', () => {
-  // 打开时：若无显式 URL/near，则用书签位覆盖初始定位
+  // 进入帖子：若无显式 URL/near，则用书签位覆盖初始定位
   extend(DiscussionPage.prototype, 'oncreate', function () {
     if (!app.session.user) return;
     const discussion = (this as any).discussion;
@@ -43,7 +43,7 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     }
   });
 
-  // 在 PostStream 的官方“位置变更”节流时机里写库
+  // 利用 PostStream 的节流回调落库（覆盖但尊重原回调）
   override(DiscussionPage.prototype, 'view', function (original: any, ...args: any[]) {
     const vdom = original(...args);
 
@@ -73,7 +73,6 @@ app.initializers.add('lady-byron/reading-enhance', () => {
           }
         };
 
-        // 再次兜底：若无显式 URL/near，用书签位作为 targetPost
         const discussion = (this as any).discussion;
         const recorded: number | null = discussion?.attribute('lbReadingPosition') ?? null;
         if (!hasExplicitTarget() && recorded) {
@@ -86,3 +85,4 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     return vdom;
   });
 });
+
