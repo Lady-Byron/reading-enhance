@@ -24,27 +24,36 @@ class SaveReadingPositionController extends AbstractShowController
         $actor = RequestUtil::getActor($request);
         $actor->assertRegistered();
 
-        // 路由参数 {id:[0-9]+} 已在 extend.php 约束为数字
-        $discussionId = (int) $request->getAttribute('id');
+        $body = (array) $request->getParsedBody();
 
-        // 解析请求体
-        $body   = (array) $request->getParsedBody();
-        $number = Arr::get($body, 'postNumber')
+        // 从 body 读取 discussionId 与 postNumber（不再依赖路径参数）
+        $discussionId = Arr::get($body, 'discussionId')
+            ?? Arr::get($body, 'data.attributes.discussionId');
+        $postNumber = Arr::get($body, 'postNumber')
             ?? Arr::get($body, 'data.attributes.postNumber');
-        $number = $number !== null ? (int) $number : null;
 
-        // 找讨论（id 无效会抛 404，符合预期）
-        $discussion = $this->discussions->findOrFail($discussionId, $actor);
+        $discussionId = $discussionId !== null ? (int) $discussionId : null;
+        $postNumber   = $postNumber   !== null ? (int) $postNumber   : null;
 
-        // 仅当提供了合法 postNumber 时才写入
-        if ($number !== null && $number > 0) {
-            $state = $discussion->stateFor($actor);
-            $state->lb_read_post_number = $number;
-            $state->lb_read_at = \Illuminate\Support\Carbon::now();
-            $state->save();
+        if (!$discussionId || $discussionId <= 0) {
+            // 422：参数无效
+            $document->setMeta(['error' => 'invalid_discussion_id']);
+            return null;
         }
 
-        // 返回讨论资源（含我们扩展的 lbReadingPosition）
+        $discussion = $this->discussions->findOrFail($discussionId, $actor);
+
+        if ($postNumber !== null && $postNumber > 0) {
+            $state = $discussion->stateFor($actor);
+            $state->lb_read_post_number = $postNumber;
+            $state->lb_read_at = \Illuminate\Support\Carbon::now();
+            $state->save();
+        } else {
+            // 不写入，仅返回讨论，方便前端探测
+            $document->setMeta(['note' => 'no_postNumber_provided']);
+        }
+
         return $discussion;
     }
 }
+
