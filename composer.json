@@ -1,0 +1,23 @@
+{
+  "name": "lady-byron/reading-enhance",
+  "description": "Always resume a discussion at the last stable reading position, synced per-user across devices.",
+  "type": "flarum-extension",
+  "license": "MIT",
+  "require": {
+    "flarum/core": "^1.8"
+  },
+  "autoload": {
+    "psr-4": {
+      "LadyByron\\ReadingEnhance\\": "src/"
+    }
+  },
+  "extra": {
+    "flarum-extension": {
+      "title": "Reading Enhance",
+      "category": "feature",
+      "icon": {
+        "name": "fas fa-bookmark"
+      }
+    }
+  }
+}
