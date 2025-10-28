@@ -12,37 +12,38 @@ use Tobscure\JsonApi\Document;
 
 class SaveReadingPositionController extends AbstractShowController
 {
+    /** @var string */
     public $serializer = DiscussionSerializer::class;
 
-    protected DiscussionRepository $discussions;
-
-    public function __construct(DiscussionRepository $discussions)
-    {
-        $this->discussions = $discussions;
-    }
+    public function __construct(
+        protected DiscussionRepository $discussions
+    ) {}
 
     protected function data(ServerRequestInterface $request, Document $document)
     {
         $actor = RequestUtil::getActor($request);
-        $actor->assertRegistered(); // 必须登录
+        $actor->assertRegistered();
 
-        $discussionId = Arr::get($request->getQueryParams(), 'id');
+        // 路径参数 {id} 应该通过 getAttribute('id') 获取
+        $discussionId = $request->getAttribute('id');
+
         $discussion = $this->discussions->findOrFail($discussionId, $actor);
 
         $body = (array) $request->getParsedBody();
-        // 允许 JSON:API 风格或简洁风格
+
+        // 支持两种载荷：{ postNumber: 123 } 或 JSON:API 的 data.attributes.postNumber
         $number = (int) (Arr::get($body, 'postNumber')
             ?? Arr::get($body, 'data.attributes.postNumber'));
 
         if ($number > 0) {
             $state = $discussion->stateFor($actor);
-            // “始终记录最后一次稳定停留楼层”，允许上/下移动
-            $state->lb_read_post_number = $number;
+            $state->lb_read_post_number = $number; // “最后一次稳定停留楼层”
             $state->lb_read_at = now();
-            $state->save();
+            $state->save(); // 不影响核心 last_read_post_number
         }
 
-        // 返回讨论资源（含我们在 serializer 里加的 lbReadingPosition）
+        // 返回讨论资源（包含我们在 Serializer 里扩展的 lbReadingPosition）
         return $discussion;
     }
 }
+
