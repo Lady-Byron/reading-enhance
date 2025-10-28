@@ -14,7 +14,7 @@ return [
     (new Extend\Frontend('forum'))
         ->js(__DIR__.'/js/dist/forum.js'),
 
-    // 类型映射（注意没有 date()，而是 cast datetime）
+    // 类型映射（注意 cast，而不是 date()）
     (new Extend\Model(UserState::class))
         ->cast('lb_read_post_number', 'int')
         ->cast('lb_read_at', 'datetime'),
@@ -33,8 +33,9 @@ return [
             return $attributes;
         }),
 
-    // 仅保留：1) 主路由（POST）  2) 探针（GET）
+    // 仅保留：POST 主路由 + 探针
     (new Extend\Routes('api'))
-        ->post('/discussions/{id}/reading-position', 'ladybyron.reading-position.save', SaveReadingPositionController::class)
+        // 关键改动：限定 id 为数字，确保 {id} 一定匹配并注入到 attribute
+        ->post('/discussions/{id:[0-9]+}/reading-position', 'ladybyron.reading-position.save', SaveReadingPositionController::class)
         ->get('/lb-ping', 'ladybyron.ping', PingController::class),
 ];
