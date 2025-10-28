@@ -14,10 +14,10 @@ return [
     (new Extend\Frontend('forum'))
         ->js(__DIR__.'/js/dist/forum.js'),
 
-    // Eloquent 类型映射（不是迁移）
+    // ✅ 类型映射：用 cast，而不是 date()
     (new Extend\Model(UserState::class))
         ->cast('lb_read_post_number', 'int')
-        ->date('lb_read_at'),
+        ->cast('lb_read_at', 'datetime'),
 
     // 把书签位随讨论返回（列表与详情）
     (new Extend\ApiSerializer(BasicDiscussionSerializer::class))
@@ -33,21 +33,20 @@ return [
             return $attributes;
         }),
 
-    // API 路由
+    // API 路由（含探针与双路径，便于你验证）
     (new Extend\Routes('api'))
-
-        // ① 读写书签位（原设计路径）——临时同时开放 GET 便于你在控制台验证命中情况
+        // 原设计路径 + 额外 GET 便于调试
         ->get  ('/discussions/{id}/reading-position', 'ladybyron.reading-position.get',  SaveReadingPositionController::class)
         ->post ('/discussions/{id}/reading-position', 'ladybyron.reading-position.save', SaveReadingPositionController::class)
         ->patch('/discussions/{id}/reading-position', 'ladybyron.reading-position.save', SaveReadingPositionController::class)
         ->put  ('/discussions/{id}/reading-position', 'ladybyron.reading-position.save', SaveReadingPositionController::class)
 
-        // ② 备用路径（规避极端匹配/代理差异）
+        // 备用路径（规避极少数环境差异）
         ->get  ('/ladybyron/reading-position/{id}', 'ladybyron.reading-position.alt.get',  SaveReadingPositionController::class)
         ->post ('/ladybyron/reading-position/{id}', 'ladybyron.reading-position.alt.save', SaveReadingPositionController::class)
         ->patch('/ladybyron/reading-position/{id}', 'ladybyron.reading-position.alt.save', SaveReadingPositionController::class)
         ->put  ('/ladybyron/reading-position/{id}', 'ladybyron.reading-position.alt.save', SaveReadingPositionController::class)
 
-        // ③ 探针（PSR-15 控制器）
+        // 探针（PSR-15 控制器）
         ->get('/lb-ping', 'ladybyron.ping', PingController::class),
 ];
