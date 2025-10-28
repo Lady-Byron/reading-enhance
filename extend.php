@@ -26,6 +26,12 @@ return [
             return $attributes;
         }),
 
+    (new \Flarum\Extend\Routes('api'))
+        ->get('/lb-ping', 'ladybyron.ping', function () {
+        return new \Laminas\Diactoros\Response\JsonResponse(['ok' => true, 'ts' => time()]);
+        }),
+
+
     // 保存阅读位置的 API 路由
     (new Extend\Routes('api'))
         ->post('/discussions/{id}/reading-position', 'ladybyron.reading-position.save', SaveReadingPositionController::class),
