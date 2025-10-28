@@ -1,103 +1,81 @@
 import app from 'flarum/forum/app';
-import { extend, override } from 'flarum/common/extend';
 import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import PostStream from 'flarum/forum/components/PostStream';
-
-type Vnode = any;
+import { extend, override } from 'flarum/common/extend';
 
 function hasExplicitTarget(): boolean {
-  // 显式 URL/near 始终优先
   const near = (m.route.param && m.route.param('near')) || null;
   const hash = (typeof window !== 'undefined' && window.location.hash) || '';
   return !!near || /^#p\d+$/i.test(hash);
 }
 
-function extractTopVisiblePostNumber(): number | null {
-  // 兜底：从 DOM 计算“首个完全可见”的楼层号（Post DOM 带 data-number）
+function extractTopFullyVisiblePostNumber(): number | null {
   const items = document.querySelectorAll<HTMLElement>('.PostStream-item[data-number]');
-  const topOffset = 0; // 可按需扣掉页头高度
   for (const el of Array.from(items)) {
     const rect = el.getBoundingClientRect();
-    if (rect.top >= topOffset && rect.bottom <= (window.innerHeight || 0)) {
-      const num = parseInt(el.dataset.number || '', 10);
-      if (num > 0) return num;
+    if (rect.top >= 0 && rect.bottom <= (window.innerHeight || 0)) {
+      const n = parseInt(el.dataset.number || '', 10);
+      if (n > 0) return n;
     }
   }
   return null;
 }
 
 function savePosition(discussionId: string, postNumber: number) {
-  // 去抖：在 PostStream 内部已有 calculatePositionTimeout 节流，我们不再二次节流
   return app
     .request({
       method: 'POST',
-      url: `${app.forum.attribute('apiUrl')}/discussions/${discussionId}/reading-position`,
+      // ✅ 使用不与 JSON:API 关系端点冲突的新路由
+      url: `${app.forum.attribute('apiUrl')}/ladybyron/reading-position/${discussionId}`,
       body: { postNumber },
     })
     .catch(() => {});
 }
 
 app.initializers.add('lady-byron/reading-enhance', () => {
-  // 1) 覆盖开场定位：如果没有显式 near/hash，就用我们记录的阅读位置
+  // 打开时：若无显式 URL/near，则用书签位覆盖初始定位
   extend(DiscussionPage.prototype, 'oncreate', function () {
     if (!app.session.user) return;
-
     const discussion = (this as any).discussion;
-    if (!discussion) return;
-
-    const recorded: number | null = discussion.attribute('lbReadingPosition') || null;
-
+    const recorded: number | null = discussion?.attribute('lbReadingPosition') ?? null;
     if (!hasExplicitTarget() && recorded && (this as any).stream) {
-      // 延迟到下一帧，避免与核心初始定位竞争
-      requestAnimationFrame(() => {
-        (this as any).stream.goToNumber(recorded);
-      });
+      requestAnimationFrame(() => (this as any).stream.goToNumber(recorded));
     }
   });
 
-  // 2) 在渲染树里给 PostStream 注入 onPositionChange 回调（复用官方时机/节流）
+  // 在 PostStream 的官方“位置变更”节流时机里写库
   override(DiscussionPage.prototype, 'view', function (original: any, ...args: any[]) {
     const vdom = original(...args);
 
-    const inject = (node: Vnode) => {
+    const inject = (node: any) => {
       if (!node) return;
       if (Array.isArray(node)) return node.forEach(inject);
       if (node.children) inject(node.children);
-      const tag = (node as any).tag;
-      if (tag === PostStream) {
+
+      if (node.tag === PostStream) {
         node.attrs = node.attrs || {};
+
         const prev = node.attrs.onPositionChange;
-
         node.attrs.onPositionChange = (...cbArgs: any[]) => {
-          // 先调用已有的回调，保持兼容
           if (typeof prev === 'function') prev(...cbArgs);
-
           if (!app.session.user) return;
-
           const dp = this as any;
           const discussion = dp?.discussion;
           if (!discussion) return;
 
-          // “最后一次稳定停留的楼层”：优先用回调参数；若无，则用 DOM 兜底
-          // 说明：PostStream 的 onPositionChange 被核心以节流时机触发，足够代表“稳定停留”:contentReference[oaicite:7]{index=7}
-          let number: number | null = null;
-
-          // 若未来需要，可根据 cbArgs 结构解析首/末可见楼层；此处用 DOM 方案更兼容
-          number = extractTopVisiblePostNumber();
-
-          if (number && typeof number === 'number') {
-            // 需求：发新帖不强制把书签跳到自己新帖 —— 我们记录“首个完全可见楼层”，通常不会是最末回复
-            savePosition(discussion.id(), number).then(() => {
-              // 同步前端缓存，避免二次拉取
-              const current = discussion.attribute('lbReadingPosition');
-              if (current !== number) discussion.pushAttributes({ lbReadingPosition: number });
+          const n = extractTopFullyVisiblePostNumber();
+          if (n && typeof n === 'number') {
+            savePosition(discussion.id(), n).then(() => {
+              if (discussion.attribute('lbReadingPosition') !== n) {
+                discussion.pushAttributes({ lbReadingPosition: n });
+              }
             });
           }
         };
 
-        // 并且在没有显式 near/hash 时，把 targetPost 也定成我们记录的楼层（再次兜底）
+        // 再次兜底：若无显式 URL/near，用书签位作为 targetPost
         const discussion = (this as any).discussion;
-        const recorded: number | null = discussion?.attribute('lbReadingPosition') || null;
+        const recorded: number | null = discussion?.attribute('lbReadingPosition') ?? null;
         if (!hasExplicitTarget() && recorded) {
           node.attrs.targetPost = recorded;
         }
