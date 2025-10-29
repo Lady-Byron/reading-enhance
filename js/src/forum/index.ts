@@ -6,26 +6,31 @@ import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import PostStream from 'flarum/forum/components/PostStream';
 import Link from 'flarum/common/components/Link';
 
-// 尝试导入；某些构建里不存在该组件（会是 undefined）
-import DiscussionSearchResult from 'flarum/forum/components/DiscussionSearchResult' as any;
+// 可选加载：部分环境下没有单独暴露该组件
+let DiscussionSearchResult: any = null;
+try {
+  // 静态字符串 require 便于打包器解析
+  // @ts-ignore
+  DiscussionSearchResult = require('flarum/forum/components/DiscussionSearchResult').default;
+} catch { /* noop */ }
 
-/** —— 工具：判断链接是否已有显式目标（near=/d/.../N/#pN） —— */
+/** 链接是否已显式指向某楼层：?near=、/d/.../N、#pN */
 function linkHasExplicitTarget(href: string): boolean {
   return /[?&]near=\d+/.test(href) || /\/d\/[^/]+\/\d+(?:[/?#]|$)/.test(href) || /#p\d+/.test(href);
 }
 
-/** 给已有 href 追加 near（相对/绝对 href 都可） */
+/** 在现有 href 上补充 near（相对/绝对链接均可），返回相对路径以避免整页刷新 */
 function hrefWithNear(href: string, near: number): string {
   try {
     const u = new URL(href, window.location.origin);
     if (!u.searchParams.has('near')) u.searchParams.set('near', String(near));
-    return u.pathname + u.search + u.hash; // 返回相对地址，避免整页刷新
+    return u.pathname + u.search + u.hash;
   } catch {
     return href + (href.includes('?') ? '&' : '?') + 'near=' + near;
   }
 }
 
-/** 取视口顶部完全可见的楼层号（保存“最后稳定停留处”用） */
+/** 取视口顶部“完全可见”的楼层号（用于“最后稳定停留处”） */
 function extractTopFullyVisiblePostNumber(): number | null {
   const items = document.querySelectorAll<HTMLElement>('.PostStream-item[data-number]');
   for (const el of Array.from(items)) {
@@ -38,7 +43,7 @@ function extractTopFullyVisiblePostNumber(): number | null {
   return null;
 }
 
-/** 写库（静默失败即可） */
+/** 将阅读位置写入后端（静默失败即可） */
 function savePosition(discussionId: string, postNumber: number) {
   return app
     .request({
@@ -49,7 +54,7 @@ function savePosition(discussionId: string, postNumber: number) {
     .catch(() => {});
 }
 
-/** 递归找到 vnode 树里的第一个 <Link> */
+/** 在 vnode 树里找到第一个 <Link> 节点 */
 function findFirstLinkVNode(node: any): any | null {
   if (!node) return null;
   if (Array.isArray(node)) {
@@ -64,7 +69,7 @@ function findFirstLinkVNode(node: any): any | null {
   return null;
 }
 
-/** 解析 /d/<id...> 形式的帖子链接里的 discussionId（仅取数字部分） */
+/** 从 /d/<id...> 形式的链接解析出 discussionId（取数字） */
 function parseDiscussionIdFromHref(href: string): string | null {
   try {
     const u = new URL(href, window.location.origin);
@@ -76,7 +81,7 @@ function parseDiscussionIdFromHref(href: string): string | null {
   }
 }
 
-/** 读取记录值：优先从 store；没有就 GET /api/discussions/{id} 拉一次 */
+/** 读取记录值：优先从 store 拿；没有就 GET /api/discussions/{id} 拉一次；缓存结果 */
 const nearCache = new Map<string, number>();
 async function getRecordedNearForHref(href: string): Promise<number | null> {
   const id = parseDiscussionIdFromHref(href);
@@ -84,7 +89,7 @@ async function getRecordedNearForHref(href: string): Promise<number | null> {
 
   if (nearCache.has(id)) return nearCache.get(id)!;
 
-  const disc = app.store.getById?.('discussions', id);
+  const disc = (app.store as any).getById?.('discussions', id);
   let recorded: number | null = disc?.attribute?.('lbReadingPosition') ?? null;
 
   if (!recorded) {
@@ -105,8 +110,8 @@ async function getRecordedNearForHref(href: string): Promise<number | null> {
 
 app.initializers.add('lady-byron/reading-enhance', () => {
   /**
-   * A) 列表入口：在 DiscussionListItem 的 <Link> 上追加 near
-   *    （只在链接本身无显式目标且我们有记录值时）
+   * A) 讨论列表入口（首页、标签、关注/未读、以及“全页搜索结果”都复用 DiscussionListItem）
+   *    若链接无显式目标且我们有书签，就在 <Link> 上补 ?near=记录楼层
    */
   extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
     const discussion = (this as any).attrs?.discussion;
@@ -125,7 +130,7 @@ app.initializers.add('lady-byron/reading-enhance', () => {
   });
 
   /**
-   * B) 搜索入口：仅当组件存在时才扩展；否则走全局点击兜底
+   * B) 搜索下拉入口（存在时扩展 DiscussionSearchResult；否则靠全局点击兜底）
    */
   if (DiscussionSearchResult && DiscussionSearchResult.prototype) {
     extend(DiscussionSearchResult.prototype, 'view', function (vdom: any) {
@@ -146,7 +151,8 @@ app.initializers.add('lady-byron/reading-enhance', () => {
   }
 
   /**
-   * C) 深链兜底：/d/slug 直接打开且无 near/#pN 时，替换为带 near 的同一路由
+   * C) 深链兜底：直接打开 /d/slug 且无 near/#pN 时，用 replace 无刷新替换为带 near 的 URL，
+   *    然后交给核心 Resolver 完成定位（不污染历史栈）
    */
   extend(DiscussionPage.prototype, 'show', function (_: any, discussion: any) {
     if (!discussion) return;
@@ -164,7 +170,8 @@ app.initializers.add('lady-byron/reading-enhance', () => {
   });
 
   /**
-   * D) 实时写库（官方节流回调）
+   * D) 实时写库：复用官方 PostStream 的节流回调
+   *    记录“最后稳定停留处”，并将值 push 回模型（供上面改写逻辑立即可用）
    */
   override(DiscussionPage.prototype, 'view', function (original: any, ...args: any[]) {
     const vdom = original(...args);
@@ -203,27 +210,27 @@ app.initializers.add('lady-byron/reading-enhance', () => {
   });
 
   /**
-   * E) 全局兜底点击：任何 /d/... 链接，若无显式目标，则点击时先查库再补 near 再导航
-   *    - 只处理同窗口左键点击（避免干扰新窗口、复制链接等）
+   * E) 全局点击兜底：任意 /d/... 链接，若无显式目标，则点击瞬间“先查记录再补 near 再导航”
+   *    - 仅处理同窗口左键点击（避免干扰新窗口/复制链接等）
+   *    - 这样可覆盖第三方入口、搜索下拉在某些构建环境缺组件导出等情况
    */
   document.addEventListener('click', async (ev: any) => {
     const a: HTMLAnchorElement | null = ev.target?.closest?.('a');
     if (!a) return;
 
-    // 非同域、带 target、带修饰键、已显式指向楼层的链接，一律跳过
     if (a.target && a.target !== '' && a.target !== '_self') return;
     if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-    const href = a.getAttribute('href') || '';
-    if (!/\/d\//.test(href)) return;
-    if (linkHasExplicitTarget(href)) return;
 
-    // 尝试获取记录值（store 或 GET /api/discussions/{id}）
+    const href = a.getAttribute('href') || '';
+    if (!/\/d\//.test(href)) return;            // 只关心帖子链接
+    if (linkHasExplicitTarget(href)) return;    // 已显式指向的尊重原样
+
+    // 读取记录值（store 命中或 GET 一次 discussions/{id}）
     const recorded = await getRecordedNearForHref(href);
-    if (!recorded) return; // 没有记录就尊重原链接
+    if (!recorded) return; // 无记录则放行原链接
 
     ev.preventDefault();
     const target = hrefWithNear(href, recorded);
-    // 使用 Mithril 导航，保持 SPA 体验
-    m.route.set(target);
+    m.route.set(target); // 交给核心 Resolver/PostStreamState 定位
   }, { capture: true });
 });
