@@ -5,6 +5,10 @@ import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import PostStream from 'flarum/forum/components/PostStream';
 import Link from 'flarum/common/components/Link';
+import installReplyJumpInterceptor from './features/replyJumpInterceptor';
+
+// === 安装“精确令牌拦截”功能（仅抑制发帖成功后的自动滚动） ===
+installReplyJumpInterceptor();
 
 /** ---- v17 blog 路由判定（与你现有实现一致） ---- */
 function shouldRedirectDiscussionToBlog(discussion: any): boolean {
