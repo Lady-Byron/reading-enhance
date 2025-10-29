@@ -58,12 +58,14 @@ function derivePostNumberFromPositionChangeArgs(args: any[]): number | null {
 function extractNearFromUrl(): number | null {
   try {
     const url = new URL(window.location.href);
+    // /d/:id/:near
     const parts = url.pathname.split('/').filter(Boolean);
     const dIndex = parts.indexOf('d');
     if (dIndex !== -1 && parts.length > dIndex + 2) {
       const maybeNear = parseInt(parts[dIndex + 2], 10);
       if (!Number.isNaN(maybeNear) && maybeNear > 0) return maybeNear;
     }
+    // ?near=
     const qNear = parseInt(url.searchParams.get('near') || '', 10);
     if (!Number.isNaN(qNear) && qNear > 0) return qNear;
   } catch {}
@@ -136,6 +138,7 @@ function scheduleSaveBidirectional(discussion: any, candidate: number) {
 /** =================== 原插件：列表项改写（不处理搜索页） =================== */
 app.initializers.add('lady-byron/reading-enhance', () => {
   extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
+    // 按既有逻辑：搜索页（params.q）不改写，保留“最相关”体验；全局兜底会覆盖其它来源
     if ((this as any).attrs?.params?.q) return;
 
     const discussion = (this as any).attrs?.discussion;
@@ -208,73 +211,18 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     return vdom;
   });
 
-  /** =================== 全局兜底优化（悬停可重复、点击阻止默认+同步导航） =================== */
+  /** =================== 全局兜底优化 =================== */
 
   // —— 缓存：id → near
   const nearCache: Map<string, number> = new Map();
 
-  // 从 store 或 API 获取 near：优先 lbReadingPosition，再用 lastReadPostNumber
-  async function resolveNearForId(id: string): Promise<number | null> {
-    if (!app.session.user) return null;
-
-    if (nearCache.has(id)) return nearCache.get(id)!;
-
-    const d = app.store.getById('discussions', id);
-    if (d) {
-      const lb = d.attribute && d.attribute('lbReadingPosition');
-      const last =
-        typeof d.lastReadPostNumber === 'function'
-          ? d.lastReadPostNumber()
-          : d.attribute && d.attribute('lastReadPostNumber');
-      const n = (typeof lb === 'number' && lb > 1) ? lb : (typeof last === 'number' && last > 1 ? last : null);
-      if (n) {
-        nearCache.set(id, n);
-        return n;
-      }
-    }
-
-    try {
-      const res: any = await app.request({
-        method: 'GET',
-        url: `${app.forum.attribute('apiUrl')}/discussions/${id}`,
-        params: {
-          // 显式带上 lbReadingPosition 与 lastReadPostNumber
-          'fields[discussions]': 'title,slug,lastReadPostNumber,lbReadingPosition',
-        },
-      });
-
-      const attrs = res?.data?.attributes || {};
-      const lb = typeof attrs.lbReadingPosition === 'number' ? attrs.lbReadingPosition : null;
-      const last = typeof attrs.lastReadPostNumber === 'number' ? attrs.lastReadPostNumber : null;
-
-      const n = (lb && lb > 1) ? lb : (last && last > 1 ? last : null);
-      if (n) {
-        nearCache.set(id, n);
-        return n;
-      }
-    } catch {}
-
-    return null;
-  }
-
-  function isSameOrigin(u: URL): boolean {
+  function sameOrigin(u: URL): boolean {
     try {
       const base = new URL(app.forum.attribute('baseUrl'));
       return u.origin === base.origin;
-    } catch { return false; }
-  }
-
-  function hasExplicitNear(u: URL): boolean {
-    const parts = u.pathname.split('/').filter(Boolean);
-    const dIndex = parts.indexOf('d');
-    if (dIndex !== -1 && parts.length > dIndex + 2) {
-      const maybeNear = parseInt(parts[dIndex + 2], 10);
-      if (!Number.isNaN(maybeNear) && maybeNear > 0) return true;
+    } catch {
+      return false;
     }
-    const qNear = parseInt(u.searchParams.get('near') || '', 10);
-    if (!Number.isNaN(qNear) && qNear > 0) return true;
-    if (u.hash && /^#p\d+$/i.test(u.hash)) return true;
-    return false;
   }
 
   function parseDiscussionIdFromUrl(u: URL): string | null {
@@ -286,17 +234,70 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     return match ? match[1] : null;
   }
 
-  function rewriteHrefWithNear(u: URL, near: number): void {
+  function hasExplicitNear(u: URL): number | null {
     const parts = u.pathname.split('/').filter(Boolean);
     const dIndex = parts.indexOf('d');
-    if (dIndex === -1 || parts.length <= dIndex + 1) return;
+    if (dIndex !== -1 && parts.length > dIndex + 2) {
+      const n = parseInt(parts[dIndex + 2], 10);
+      if (!Number.isNaN(n) && n > 0) return n;
+    }
+    const qNear = parseInt(u.searchParams.get('near') || '', 10);
+    if (!Number.isNaN(qNear) && qNear > 0) return qNear;
+    if (u.hash && /^#p\d+$/i.test(u.hash)) {
+      const n = parseInt(u.hash.slice(2), 10);
+      if (!Number.isNaN(n) && n > 0) return n;
+    }
+    return null;
+  }
+
+  function buildNearUrl(u: URL, near: number): string {
+    const parts = u.pathname.split('/').filter(Boolean);
+    const dIndex = parts.indexOf('d');
     const prefix = '/' + parts.slice(0, dIndex + 2).join('/');
     u.pathname = `${prefix}/${near}`;
     u.searchParams.delete('near');
     if (u.hash && /^#p\d+$/i.test(u.hash)) u.hash = '';
+    return u.pathname + u.search + u.hash;
   }
 
-  // 悬停：可重复改写（若 near 变化则刷新 href）
+  function nearFromStore(id: string): number | null {
+    const d = app.store.getById('discussions', id);
+    if (!d) return null;
+    const lb = d.attribute && d.attribute('lbReadingPosition');
+    const last =
+      typeof d.lastReadPostNumber === 'function'
+        ? d.lastReadPostNumber()
+        : d.attribute && d.attribute('lastReadPostNumber');
+    return typeof lb === 'number' && lb > 1
+      ? lb
+      : typeof last === 'number' && last > 1
+      ? last
+      : null;
+  }
+
+  async function nearFromApi(id: string): Promise<number | null> {
+    try {
+      const res: any = await app.request({
+        method: 'GET',
+        url: `${app.forum.attribute('apiUrl')}/discussions/${id}`,
+        params: {
+          'fields[discussions]': 'title,slug,lastReadPostNumber,lbReadingPosition',
+        },
+      });
+      const attrs = res?.data?.attributes || {};
+      const lb =
+        typeof attrs.lbReadingPosition === 'number' ? attrs.lbReadingPosition : null;
+      const last =
+        typeof attrs.lastReadPostNumber === 'number'
+          ? attrs.lastReadPostNumber
+          : null;
+      return (lb && lb > 1) ? lb : (last && last > 1 ? last : null);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 悬停：可重复刷新 near（为了左下角预览更准） */
   const hoverTimers = new WeakMap<EventTarget, number>();
 
   function findAnchor(target: EventTarget | null): HTMLAnchorElement | null {
@@ -308,93 +309,138 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     return null;
   }
 
-  document.addEventListener('mouseover', (e) => {
-    const a = findAnchor(e.target);
-    if (!a) return;
+  document.addEventListener(
+    'mouseover',
+    (e) => {
+      const a = findAnchor(e.target);
+      if (!a) return;
 
-    const t = window.setTimeout(async () => {
+      const t = window.setTimeout(async () => {
+        try {
+          const u = new URL(a.href, window.location.href);
+          if (!sameOrigin(u)) return;
+
+          const explicit = hasExplicitNear(u);
+          if (explicit) return; // 已显式 near，无需改
+
+          const id = parseDiscussionIdFromUrl(u);
+          if (!id) return;
+
+          let near = nearCache.get(id) ?? nearFromStore(id);
+          if (!near) {
+            near = await nearFromApi(id);
+            if (near) nearCache.set(id, near);
+          }
+          if (near && near > 1) {
+            const prev = a.dataset.lbRewrittenNear
+              ? parseInt(a.dataset.lbRewrittenNear, 10)
+              : null;
+            if (prev !== near) {
+              a.href = buildNearUrl(u, near);
+              a.dataset.lbRewritten = '1';
+              a.dataset.lbRewrittenNear = String(near);
+            }
+          }
+        } catch {}
+      }, 120);
+
+      hoverTimers.set(a, t);
+    },
+    { passive: true }
+  );
+
+  document.addEventListener(
+    'mouseout',
+    (e) => {
+      const a = findAnchor(e.target);
+      if (!a) return;
+      const t = hoverTimers.get(a);
+      if (t) {
+        window.clearTimeout(t);
+        hoverTimers.delete(a);
+      }
+    },
+    { passive: true }
+  );
+
+  /** 点击接管：无论是否已有 near，都在捕获阶段阻断，再由我们导航到“最终 URL” */
+  document.addEventListener(
+    'click',
+    (e) => {
+      const a = findAnchor(e.target);
+      if (!a) return;
+
+      let u: URL;
       try {
-        const u = new URL(a.href, window.location.href);
-        if (!isSameOrigin(u) || hasExplicitNear(u)) return;
+        u = new URL(a.href, window.location.href);
+      } catch {
+        return;
+      }
+      if (!sameOrigin(u)) return;
 
-        const id = parseDiscussionIdFromUrl(u);
-        if (!id) return;
+      const id = parseDiscussionIdFromUrl(u);
+      if (!id) return; // 只接管 /d/… 讨论链接
 
-        const near = await resolveNearForId(id);
-        if (near && near > 1) {
-          const prev = a.dataset.lbRewrittenNear ? parseInt(a.dataset.lbRewrittenNear, 10) : null;
-          // 只有在 near 发生变化时才重写，避免频繁抖动
-          if (prev !== near) {
-            rewriteHrefWithNear(u, near);
-            a.href = u.toString();
-            a.dataset.lbRewritten = '1';
-            a.dataset.lbRewrittenNear = String(near);
+      // 阻断后续所有处理，防止容器自己 m.route.set('/d/:id') 覆盖 near
+      e.preventDefault();
+      // @ts-ignore
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+
+      (async () => {
+        // 1) 若链接本身已有 near → 直接用（我们来发起导航，避免被覆盖）
+        let near = hasExplicitNear(u);
+
+        // 2) 否则按 lb > last 求 near（先缓存/模型，再必要时请求 API）
+        if (!near) near = nearCache.get(id) ?? nearFromStore(id);
+        if (!near) {
+          near = await nearFromApi(id);
+          if (near) nearCache.set(id, near);
+        }
+
+        const target =
+          near && near > 1 ? buildNearUrl(u, near) : u.pathname + u.search + u.hash;
+
+        // 统一由我们导航，确保 near 不被覆盖
+        // @ts-ignore
+        return m.route.set(target);
+      })().catch(() => {
+        // 失败时用原始 href 兜底
+        // @ts-ignore
+        m.route.set(a.getAttribute('href')!);
+      });
+    },
+    { capture: true }
+  );
+
+  /** 兜底补丁：任何地方调用 m.route.set('/d/:id') 时，如果我们有 near，就补成 '/:near' */
+  // @ts-ignore
+  const oldSet = m.route.set.bind(m.route);
+  // @ts-ignore
+  m.route.set = function (path: string, data?: any, options?: any) {
+    try {
+      const url = new URL(path, window.location.origin);
+      const parts = url.pathname.split('/').filter(Boolean);
+      const dIndex = parts.indexOf('d');
+      if (dIndex !== -1 && parts.length > dIndex + 1) {
+        const hasNearPath = parts.length > dIndex + 2 && /^\d+$/.test(parts[dIndex + 2]);
+        const hasNearQuery = url.searchParams.has('near');
+        if (!hasNearPath && !hasNearQuery) {
+          const idPart = parts[dIndex + 1];
+          const idMatch = /^(\d+)/.exec(idPart);
+          const id = idMatch ? idMatch[1] : null;
+          if (id) {
+            const near = nearFromStore(id);
+            if (near && near > 1) {
+              const prefix = '/' + parts.slice(0, dIndex + 2).join('/');
+              url.pathname = `${prefix}/${near}`;
+              url.searchParams.delete('near');
+              path = url.pathname + url.search + url.hash;
+            }
           }
         }
-      } catch {}
-    }, 120);
-
-    hoverTimers.set(a, t);
-  }, { passive: true });
-
-  document.addEventListener('mouseout', (e) => {
-    const a = findAnchor(e.target);
-    if (!a) return;
-    const t = hoverTimers.get(a);
-    if (t) {
-      window.clearTimeout(t);
-      hoverTimers.delete(a);
-    }
-  }, { passive: true });
-
-  // 点击：阻止默认 + 同步决定最终 near 然后导航
-  document.addEventListener('click', (e) => {
-    const a = findAnchor(e.target);
-    if (!a) return;
-
-    let u: URL;
-    try { u = new URL(a.href, window.location.href); } catch { return; }
-
-    if (!isSameOrigin(u) || hasExplicitNear(u)) return;
-
-    const id = parseDiscussionIdFromUrl(u);
-    if (!id) return;
-
-    // 阻止默认，避免 Mithril 先用旧 href 导航
-    e.preventDefault();
-
-    // 先用“眼前可用”的 near（缓存/模型），保证快速跳转；若没有再等 API
-    (async () => {
-      let near: number | null = nearCache.get(id) ?? null;
-
-      if (!near) {
-        const d = app.store.getById('discussions', id);
-        if (d) {
-          const lb = d.attribute && d.attribute('lbReadingPosition');
-          const last =
-            typeof d.lastReadPostNumber === 'function'
-              ? d.lastReadPostNumber()
-              : d.attribute && d.attribute('lastReadPostNumber');
-          near = (typeof lb === 'number' && lb > 1) ? lb : (typeof last === 'number' && last > 1 ? last : null);
-        }
       }
-
-      if (!near) near = await resolveNearForId(id);
-
-      if (near && near > 1) {
-        rewriteHrefWithNear(u, near);
-        // 用 Mithril 导航，保持 SPA
-        // @ts-ignore
-        return m.route.set(u.pathname + u.search + u.hash);
-      }
-
-      // 没拿到 near：退回原 href
-      // @ts-ignore
-      return m.route.set(a.getAttribute('href')!);
-    })().catch(() => {
-      // 出错时做最保守的导航回退
-      // @ts-ignore
-      m.route.set(a.getAttribute('href')!);
-    });
-  }, { capture: true });
+    } catch {}
+    // @ts-ignore
+    return oldSet(path, data, options);
+  };
 });
