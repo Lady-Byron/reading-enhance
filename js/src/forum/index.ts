@@ -33,25 +33,22 @@ function shouldRedirectDiscussionToBlog(discussion: any): boolean {
 
 /** 从 PostStream 的 onPositionChange 回调参数中尽量还原“当前可见楼层号” */
 function derivePostNumberFromPositionChangeArgs(args: any[]): number | null {
-  // 兼容若干可能的签名： (index, number) / ({ number }) / ({ postNumber }) / ({ near }) …
   for (const a of args) {
     if (a == null) continue;
 
     if (typeof a === 'number') {
-      // 注意：有的实现第一个可能是 index，但通常会出现“一个明显大于 0 的 number”
       if (a > 0) return a;
       continue;
     }
 
     if (typeof a === 'object') {
-      // 常见字段
+      // 常见字段：number / postNumber / near / visible.number
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       if (typeof a.number === 'number' && a.number > 0) return a.number;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       if (typeof a.postNumber === 'number' && a.postNumber > 0) return a.postNumber;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       if (typeof a.near === 'number' && a.near > 0) return a.near;
-      // 某些包装对象 visible: { number }
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       if (a.visible && typeof a.visible.number === 'number' && a.visible.number > 0) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
@@ -87,16 +84,16 @@ function extractNearFromUrl(): number | null {
 /** 退路：取“视口顶部相交”的第一楼（部分可见即可），更贴近原生体验 */
 function extractTopPartiallyVisible(): number | null {
   const items = document.querySelectorAll<HTMLElement>('.PostStream-item[data-number]');
-  const viewportTop = 0 + 4; // 给 4px 容忍，避免顶部边框抖动
+  const viewportTop = 4; // 小容忍，避免边框抖动
   for (const el of Array.from(items)) {
     const rect = el.getBoundingClientRect();
-    // 只要顶部在视口上方/内，且底部仍在视口下方（有任意可见面积）
+    // 顶部在视口上方/内 && 底部在视口下方 → 有任意可见面积
     if (rect.top <= viewportTop && rect.bottom > viewportTop) {
       const n = parseInt(el.dataset.number || '', 10);
       if (n > 0) return n;
     }
   }
-  // 若没有正好跨过顶部的，择第一个“下半部进入视口”的
+  // 如果没有跨过顶部的，取第一个进入视口的
   for (const el of Array.from(items)) {
     const rect = el.getBoundingClientRect();
     if (rect.top >= viewportTop && rect.top < (window.innerHeight || 0)) {
@@ -118,46 +115,48 @@ function savePosition(discussionId: string, postNumber: number) {
     .catch(() => {});
 }
 
-/** 轻节流与只前进：避免高频/倒退写入 */
-const lastSentByDiscussion: Record<string, number> = Object.create(null);
+/** 轻节流 + 去重（双向允许）：把“最近一次候选值”在 200ms 后提交 */
+const DEBOUNCE_MS = 200;
 const pendingTimerByDiscussion: Record<string, number> = Object.create(null);
+const pendingCandidateByDiscussion: Record<string, number> = Object.create(null);
+const lastCommittedByDiscussion: Record<string, number> = Object.create(null);
 
-function scheduleSaveForwardOnly(discussion: any, candidate: number) {
+function scheduleSaveBidirectional(discussion: any, candidate: number) {
   const id: string = discussion.id();
-  const currentSaved = discussion.attribute('lbReadingPosition') ?? 0;
-  const lastSent = lastSentByDiscussion[id] ?? 0;
 
-  // 只前进：新数必须 > 两个本地参照
-  const target = Math.max(candidate | 0, 0);
-  if (!(target > currentSaved && target > lastSent)) return;
+  // 去重：若与当前待发一样，就不刷新定时器
+  if (pendingCandidateByDiscussion[id] === candidate) return;
 
-  // 合并 200ms 内的多次抖动，只保留最大值
-  lastSentByDiscussion[id] = target;
+  pendingCandidateByDiscussion[id] = candidate;
+
   if (pendingTimerByDiscussion[id]) window.clearTimeout(pendingTimerByDiscussion[id]);
 
   pendingTimerByDiscussion[id] = window.setTimeout(() => {
-    const toSend = lastSentByDiscussion[id];
-    // 二次确认“只前进”
-    if (!(toSend > (discussion.attribute('lbReadingPosition') ?? 0))) return;
+    const toSend = pendingCandidateByDiscussion[id];
+    if (typeof toSend !== 'number' || toSend <= 0) return;
+
+    // 仍做一次“值没变就不发”的保护，避免空写
+    const current = discussion.attribute('lbReadingPosition') ?? 0;
+    const lastCommitted = lastCommittedByDiscussion[id] ?? current;
+    if (toSend === current || toSend === lastCommitted) return;
 
     savePosition(id, toSend).then(() => {
-      // 同步到模型，供列表改写 near 立即可用
+      lastCommittedByDiscussion[id] = toSend;
       if (discussion.attribute('lbReadingPosition') !== toSend) {
         discussion.pushAttributes({ lbReadingPosition: toSend });
       }
     });
-  }, 200);
+  }, DEBOUNCE_MS);
 }
 
 app.initializers.add('lady-byron/reading-enhance', () => {
   /**
-   * A) 改写“讨论列表项”里的 <Link>（与原先一致）：
+   * A) 改写“讨论列表项”里的 <Link>（保持原先逻辑）：
    *    - 跳过搜索页（this.attrs.params.q 存在时不改写）
    *    - 用 lbReadingPosition 作为 near
    *    - 兼容 v17 blog
    */
   extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
-    // 搜索结果保留“最相关”默认体验
     if ((this as any).attrs?.params?.q) return;
 
     const discussion = (this as any).attrs?.discussion;
@@ -196,10 +195,11 @@ app.initializers.add('lady-byron/reading-enhance', () => {
   });
 
   /**
-   * B) 与原生同步的“阅读位置 → 实时写库”：
-   *    - 直接复用 PostStream 的 onPositionChange（与原生 URL 更新同源）
-   *    - 回调缺失/不可判读时：回退 URL near → 回退顶部相交探测
-   *    - 仅向前推进 + 200ms 合并
+   * B) 与原生同步的“阅读位置 → 实时写库（双向）”：
+   *    - 首选 onPositionChange 回调参数
+   *    - 回退 URL near
+   *    - 最后退路：顶部相交探测
+   *    - 200ms 合并；允许向前或向后记录
    */
   override(DiscussionPage.prototype, 'view', function (original: any, ...args: any[]) {
     const vdom = original(...args);
@@ -221,17 +221,17 @@ app.initializers.add('lady-byron/reading-enhance', () => {
           const discussion = dp?.discussion;
           if (!discussion) return;
 
-          // 1) 首选：从回调参数还原（与原生完全一致的来源）
+          // 1) 与原生同源：从回调参数拿“当前可见楼层号”
           let n = derivePostNumberFromPositionChangeArgs(cbArgs);
 
-          // 2) 回退：从 URL 近因（原生滚动时会同步 near 到地址栏）
+          // 2) 回退：URL near（原生滚动时会同步 near 到地址栏）
           if (!n) n = extractNearFromUrl();
 
-          // 3) 最后退路：顶部相交的首个部分可见楼层
+          // 3) 最后退路：顶部相交
           if (!n) n = extractTopPartiallyVisible();
 
           if (n && typeof n === 'number' && n > 0) {
-            scheduleSaveForwardOnly(discussion, n);
+            scheduleSaveBidirectional(discussion, n);
           }
         };
       }
