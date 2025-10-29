@@ -5,12 +5,13 @@ import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 import DiscussionPage from 'flarum/forum/components/DiscussionPage';
 import PostStream from 'flarum/forum/components/PostStream';
 import Link from 'flarum/common/components/Link';
+
+// 模块化能力
 import installReplyJumpInterceptor from './features/replyJumpInterceptor';
 import installReadingShortcuts from './features/readingShortcuts';
 
 // 安装“发帖后自动跳尾抑制”
 installReplyJumpInterceptor();
-
 // 安装“阅读快捷键：Shift+D/Shift+U/Shift+J/Shift+K”
 installReadingShortcuts();
 
@@ -46,17 +47,11 @@ function derivePostNumberFromPositionChangeArgs(args: any[]): number | null {
     if (typeof a === 'number') {
       if (a > 0) return a;
     } else if (typeof a === 'object') {
-      // number / postNumber / near / visible.number
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      if (typeof a.number === 'number' && a.number > 0) return a.number;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      if (typeof a.postNumber === 'number' && a.postNumber > 0) return a.postNumber;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      if (typeof a.near === 'number' && a.near > 0) return a.near;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      if (a.visible && typeof a.visible.number === 'number' && a.visible.number > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        return a.visible.number as number;
+      if (typeof (a as any).number === 'number' && (a as any).number > 0) return (a as any).number;
+      if (typeof (a as any).postNumber === 'number' && (a as any).postNumber > 0) return (a as any).postNumber;
+      if (typeof (a as any).near === 'number' && (a as any).near > 0) return (a as any).near;
+      if ((a as any).visible && typeof (a as any).visible.number === 'number' && (a as any).visible.number > 0) {
+        return (a as any).visible.number as number;
       }
     }
   }
@@ -73,7 +68,7 @@ function extractNearFromUrl(): number | null {
       const maybeNear = parseInt(parts[dIndex + 2], 10);
       if (!Number.isNaN(maybeNear) && maybeNear > 0) return maybeNear;
     }
-    // ?near=
+    // ?near=数字
     const qNear = parseInt(url.searchParams.get('near') || '', 10);
     if (!Number.isNaN(qNear) && qNear > 0) return qNear;
   } catch {}
@@ -146,7 +141,7 @@ function scheduleSaveBidirectional(discussion: any, candidate: number) {
 /** =================== 原插件：列表项改写（不处理搜索页） =================== */
 app.initializers.add('lady-byron/reading-enhance', () => {
   extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
-    // 按既有逻辑：搜索页（params.q）不改写，保留“最相关”体验；全局兜底会覆盖其它来源
+    // 搜索页（params.q）不改写，保留“最相关”体验；全局兜底会覆盖其它来源
     if ((this as any).attrs?.params?.q) return;
 
     const discussion = (this as any).attrs?.discussion;
@@ -242,20 +237,56 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     return match ? match[1] : null;
   }
 
-  function hasExplicitNear(u: URL): number | null {
+  /** 显式 near 识别：数字 | 'first' | 'last' | #p123 | #reply/#last/#first */
+  function hasExplicitNear(u: URL): number | 'first' | 'last' | null {
     const parts = u.pathname.split('/').filter(Boolean);
     const dIndex = parts.indexOf('d');
+
+    // /d/:id/:near（数字）
     if (dIndex !== -1 && parts.length > dIndex + 2) {
       const n = parseInt(parts[dIndex + 2], 10);
-      if (!Number.isNaN(n) && n > 0) return n;
+      if (!Number.isNaN(n) && n > 0) return n; // 包含 near=1（视为明确意图）
     }
-    const qNear = parseInt(u.searchParams.get('near') || '', 10);
-    if (!Number.isNaN(qNear) && qNear > 0) return qNear;
-    if (u.hash && /^#p\d+$/i.test(u.hash)) {
-      const n = parseInt(u.hash.slice(2), 10);
+
+    // ?near=（数字 | first | last）
+    const nearRaw = u.searchParams.get('near');
+    if (nearRaw) {
+      const n = parseInt(nearRaw, 10);
       if (!Number.isNaN(n) && n > 0) return n;
+      const s = nearRaw.toLowerCase();
+      if (s === 'first') return 'first';
+      if (s === 'last') return 'last';
+    }
+
+    // 锚点：#p123 / #reply / #last / #first
+    if (u.hash) {
+      const h = u.hash.toLowerCase();
+      if (/^#p\d+$/.test(h)) return parseInt(h.slice(2), 10);
+      if (h === '#reply' || h === '#last') return 'last';
+      if (h === '#first') return 'first';
     }
     return null;
+  }
+
+  async function resolveSpecialNear(id: string, kind: 'first' | 'last'): Promise<number> {
+    if (kind === 'first') return 1;
+    const d = app.store.getById('discussions', id);
+    let last: number | null =
+      d?.lastPostNumber ? d.lastPostNumber() :
+      (d?.attribute ? d.attribute('lastPostNumber') : null);
+    if (!last) {
+      try {
+        const res: any = await app.request({
+          method: 'GET',
+          url: `${app.forum.attribute('apiUrl')}/discussions/${id}`,
+          params: { 'fields[discussions]': 'lastPostNumber' },
+        });
+        last = typeof res?.data?.attributes?.lastPostNumber === 'number'
+          ? res.data.attributes.lastPostNumber
+          : null;
+      } catch {}
+    }
+    return (last && last > 0) ? last : 1;
   }
 
   function buildNearUrl(u: URL, near: number): string {
@@ -305,9 +336,7 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     }
   }
 
-  /** 悬停：可重复刷新 near（为了左下角预览更准） */
-  const hoverTimers = new WeakMap<EventTarget, number>();
-
+  /** —— 工具：从事件目标向上找 <a> */
   function findAnchor(target: EventTarget | null): HTMLAnchorElement | null {
     let el = target as HTMLElement | null;
     while (el && el !== document.body) {
@@ -317,19 +346,28 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     return null;
   }
 
+  /** 悬停：可重复刷新 near（为了左下角预览更准）；跳过 Scrubber */
+  const hoverTimers = new WeakMap<EventTarget, number>();
+  const SCRUBBER_SKIP = '.PostStreamScrubber, .Scrubber, .item-scrubber, .PostStream-scrubber, a.Scrubber-first, a.Scrubber-last';
+
   document.addEventListener(
     'mouseover',
     (e) => {
       const a = findAnchor(e.target);
       if (!a) return;
+      if (a.matches('.Scrubber-first, .Scrubber-last') || a.closest(SCRUBBER_SKIP)) return;
 
       const t = window.setTimeout(async () => {
         try {
+          // 只处理有明确 href 的锚点
+          const hrefAttr = a.getAttribute('href');
+          if (!hrefAttr || !hrefAttr.trim()) return;
+
           const u = new URL(a.href, window.location.href);
           if (!sameOrigin(u)) return;
 
           const explicit = hasExplicitNear(u);
-          if (explicit) return; // 已显式 near，无需改
+          if (explicit) return; // 显式 near，无需改
 
           const id = parseDiscussionIdFromUrl(u);
           if (!id) return;
@@ -371,12 +409,21 @@ app.initializers.add('lady-byron/reading-enhance', () => {
     { passive: true }
   );
 
-  /** 点击接管：无论是否已有 near，都在捕获阶段阻断，再由我们导航到“最终 URL” */
+  /** 点击接管：跳过 Scrubber；尊重显式 near（含 first/last），其余按 lb>last 兜底 */
   document.addEventListener(
     'click',
     (e) => {
       const a = findAnchor(e.target);
       if (!a) return;
+
+      // 1) Scrubber 及其“最早/最新”按钮：完全放行
+      if (a.matches('.Scrubber-first, .Scrubber-last') || a.closest('.PostStreamScrubber, .Scrubber, .item-scrubber, .PostStream-scrubber')) {
+        return;
+      }
+
+      // 2) 只处理具备 href 的同源讨论链接
+      const hrefAttr = a.getAttribute('href');
+      if (!hrefAttr || !hrefAttr.trim()) return; // 没有 href（空字符串）则放行
 
       let u: URL;
       try {
@@ -389,17 +436,25 @@ app.initializers.add('lady-byron/reading-enhance', () => {
       const id = parseDiscussionIdFromUrl(u);
       if (!id) return; // 只接管 /d/… 讨论链接
 
-      // 阻断后续所有处理，防止容器自己 m.route.set('/d/:id') 覆盖 near
+      // 阻断默认，避免容器覆盖 near
       e.preventDefault();
       // @ts-ignore
       if (e.stopImmediatePropagation) e.stopImmediatePropagation();
 
       (async () => {
-        // 1) 若链接本身已有 near → 直接用（我们来发起导航，避免被覆盖）
-        let near = hasExplicitNear(u);
+        // 3) 显式 near（含 1 / 'first' / 'last' / #reply） → 严格按显式执行
+        const explicit = hasExplicitNear(u);
+        if (explicit) {
+          const near = typeof explicit === 'number'
+            ? explicit
+            : await resolveSpecialNear(id, explicit);
+          const target = buildNearUrl(u, near);
+          // @ts-ignore
+          return m.route.set(target);
+        }
 
-        // 2) 否则按 lb > last 求 near（先缓存/模型，再必要时请求 API）
-        if (!near) near = nearCache.get(id) ?? nearFromStore(id);
+        // 4) 否则按 lb > last 求 near（缓存 → 模型 → API）
+        let near = nearCache.get(id) ?? nearFromStore(id);
         if (!near) {
           near = await nearFromApi(id);
           if (near) nearCache.set(id, near);
@@ -431,7 +486,7 @@ app.initializers.add('lady-byron/reading-enhance', () => {
       const dIndex = parts.indexOf('d');
       if (dIndex !== -1 && parts.length > dIndex + 1) {
         const hasNearPath = parts.length > dIndex + 2 && /^\d+$/.test(parts[dIndex + 2]);
-        const hasNearQuery = url.searchParams.has('near');
+        const hasNearQuery = url.searchParams.has('near'); // near=first/last 也算显式
         if (!hasNearPath && !hasNearQuery) {
           const idPart = parts[dIndex + 1];
           const idMatch = /^(\d+)/.exec(idPart);
