@@ -3,13 +3,12 @@ import { getBestPostNumber } from '../utils/ReadingState';
 import { parseDiscussionIdFromUrl, isSameOrigin } from '../utils/UrlHelpers';
 
 export default function registerGlobalNavigation() {
-  
-  // 使用捕获阶段监听，确保在 Flarum 路由处理前拦截
+  console.log('[LadyByron] Global navigation handler registered');
+
   document.body.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest('a');
     if (!target || !target.href) return;
 
-    // 1. 基础检查：同源且有 href
     let url: URL;
     try { 
       url = new URL(target.href); 
@@ -17,26 +16,37 @@ export default function registerGlobalNavigation() {
     
     if (!isSameOrigin(url)) return;
 
-    // 2. 解析 ID，必须是 /d/123 格式
+    // 排除显式指定了位置的链接 /d/123/5 或 ?near=5
+    if (url.searchParams.has('near') || url.pathname.split('/').length > 3) return;
+
     const id = parseDiscussionIdFromUrl(url);
     if (!id) return;
 
-    // 3. 排除显式指定了位置的链接 (near, page, specific post)
-    // 如果 URL 已经是 /d/123/5 或 ?near=5，我们不干预
-    const parts = url.pathname.split('/').filter(Boolean);
-    const hasExplicitPost = parts.length > 2 && /^\d+$/.test(parts[2]); // /d/id/123
-    if (hasExplicitPost || url.searchParams.has('near')) return;
-
-    // 4. 查找最佳跳转位置
     const discussion = app.store.getById('discussions', id);
+    
+    // [Debug] 输出点击诊断信息
+    // console.log('[LadyByron] Clicked discussion:', id, discussion ? 'Found' : 'Not in store');
+
     if (discussion) {
       const bestPos = getBestPostNumber(discussion);
+      // console.log('[LadyByron] Calculated best pos:', bestPos);
       
       if (bestPos > 1) {
-        // 命中！阻止默认跳转，使用 Mithril 路由到指定楼层
         e.preventDefault();
         e.stopPropagation();
-        app.route.discussion(discussion, bestPos);
+        
+        // 生成目标 URL
+        const targetUrl = app.route.discussion(discussion, bestPos);
+        
+        console.log('[LadyByron] Redirecting to:', targetUrl);
+        
+        // [修复点] 真正执行路由跳转
+        // 注意：m.route.set 需要相对路径或完整路径，Flarum 环境下通常都能处理，
+        // 但为了保险，我们从 app.route 生成的完整 URL 中提取路径部分
+        const targetPath = targetUrl.replace(window.location.origin, '');
+        
+        // @ts-ignore
+        m.route.set(targetPath);
       }
     }
   }, true);
