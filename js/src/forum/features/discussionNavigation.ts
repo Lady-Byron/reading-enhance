@@ -5,9 +5,15 @@ import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 import Link from 'flarum/common/components/Link';
 
 /** ---- v17 blog 路由判定（与你现有实现一致） ---- */
+// @ts-ignore
+declare const flarum: any;
+
 function shouldRedirectDiscussionToBlog(discussion: any): boolean {
-  // @ts-ignore
-  if (!(window as any).flarum || !('v17development-blog' in (window as any).flarum.extensions)) {
+  try {
+    // flarum.extensions 由内核注入到 window 作用域
+    // @ts-ignore
+    if (!flarum || !('v17development-blog' in flarum.extensions)) return false;
+  } catch {
     return false;
   }
 
@@ -107,7 +113,7 @@ function nearFromStore(id: string): number | null {
     : null;
 }
 
-/** 把 /d/:id[/slug] 改成 /d/:id[/slug]/:near（移除 ?near，目前也不用 hash #p123） */
+/** 把 /d/:id[/slug] 改成 /d/:id[/slug]/:near（移除 ?near，去掉 #p123） */
 function buildNearUrl(u: URL, near: number): string {
   const parts = u.pathname.split('/').filter(Boolean);
   const dIndex = parts.indexOf('d');
@@ -120,6 +126,19 @@ function buildNearUrl(u: URL, near: number): string {
 
   return u.pathname + u.search + u.hash;
 }
+
+/** 从事件 target 向上寻找 <a> */
+function findAnchor(target: EventTarget | null): HTMLAnchorElement | null {
+  let el = target as HTMLElement | null;
+  while (el && el !== document.body) {
+    if (el instanceof HTMLAnchorElement) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+/** Scrubber 相关元素：完全放行 */
+const SCRUBBER_SKIP = '.PostStreamScrubber, .Scrubber, .item-scrubber, .PostStream-scrubber';
 
 let attached = false;
 
@@ -180,7 +199,6 @@ export default function installDiscussionNavigation() {
 
       let u: URL;
       try {
-        // 用 baseUrl 作为相对根，兼容相对路径
         u = new URL(href, app.forum.attribute('baseUrl'));
       } catch {
         return;
@@ -188,7 +206,6 @@ export default function installDiscussionNavigation() {
 
       if (!sameOrigin(u)) return;
 
-      // 显式 near（含 first/last/#p123/#reply）一律尊重
       const explicit = hasExplicitNear(u);
       if (explicit) return;
 
@@ -203,7 +220,7 @@ export default function installDiscussionNavigation() {
       vdom.attrs['data-lbRewritten'] = '1';
     });
 
-    /** 3) 兜底补丁：任何地方调用 m.route.set('/d/:id[..]') 时，如果我们有 near，就补上 */
+    /** 3) 兜底补丁：程序化 m.route.set('/d/:id[..]') 时补一个 near */
     // @ts-ignore
     const oldSet = m.route.set.bind(m.route);
     // @ts-ignore
@@ -240,6 +257,62 @@ export default function installDiscussionNavigation() {
 
       // @ts-ignore
       return oldSet(path, data, options);
+    };
+
+    /** 4) DOM 级兜底：点击任意 <a> 时，只改 href，不阻断，覆盖导航栏/组件内帖子 */
+    const onDocumentClick = (e: MouseEvent) => {
+      // 已经被别的 handler 阻止的，就不碰
+      if (e.defaultPrevented) return;
+
+      // 只处理左键单击，不处理中键/右键及组合键（避免破坏“新标签页”行为）
+      if (e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      const a = findAnchor(e.target);
+      if (!a) return;
+
+      // Scrubber / 楼层滑条相关链接：完全放行
+      if (a.matches('.Scrubber-first, .Scrubber-last') || a.closest(SCRUBBER_SKIP)) {
+        return;
+      }
+
+      const hrefAttr = a.getAttribute('href');
+      if (!hrefAttr || !hrefAttr.trim()) return;
+
+      let u: URL;
+      try {
+        u = new URL(a.href, window.location.href);
+      } catch {
+        return;
+      }
+
+      if (!sameOrigin(u)) return;
+
+      const explicit = hasExplicitNear(u);
+      if (explicit) return;
+
+      const id = parseDiscussionIdFromUrl(u);
+      if (!id) return;
+
+      const near = nearFromStore(id);
+      if (!near || near <= 1) return;
+
+      const target = buildNearUrl(u, near);
+
+      // 只修改 href，不 preventDefault；后续由 Flarum 或浏览器按新的 href 导航
+      if (a.href !== target) {
+        a.href = target;
+        a.dataset.lbRewritten = '1';
+      }
+    };
+
+    document.addEventListener('click', onDocumentClick, true);
+
+    // 调试/卸载用
+    (window as any).__lb_reading_nav = {
+      detach() {
+        document.removeEventListener('click', onDocumentClick, true);
+      },
     };
   });
 }
