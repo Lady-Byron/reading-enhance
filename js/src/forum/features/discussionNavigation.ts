@@ -4,14 +4,13 @@ import { extend } from 'flarum/common/extend';
 import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 import Link from 'flarum/common/components/Link';
 
-/** ---- v17 blog 路由判定（与你现有实现一致） ---- */
+// flarum.extensions 全局：用于检测 v17 blog
 // @ts-ignore
 declare const flarum: any;
 
+/** ---- v17 blog 路由判定（保持与你原来实现一致） ---- */
 function shouldRedirectDiscussionToBlog(discussion: any): boolean {
   try {
-    // flarum.extensions 由内核注入到 window 作用域
-    // @ts-ignore
     if (!flarum || !('v17development-blog' in flarum.extensions)) return false;
   } catch {
     return false;
@@ -36,7 +35,8 @@ function shouldRedirectDiscussionToBlog(discussion: any): boolean {
   });
 }
 
-/** ---- URL 工具 ---- */
+/** ---- URL / id 工具 ---- */
+
 function sameOrigin(u: URL): boolean {
   try {
     const base = new URL(app.forum.attribute('baseUrl'));
@@ -83,6 +83,7 @@ function hasExplicitNear(u: URL): number | 'first' | 'last' | null {
     if (h === '#reply' || h === '#last') return 'last';
     if (h === '#first') return 'first';
   }
+
   return null;
 }
 
@@ -117,7 +118,9 @@ function nearFromStore(id: string): number | null {
 function buildNearUrl(u: URL, near: number): string {
   const parts = u.pathname.split('/').filter(Boolean);
   const dIndex = parts.indexOf('d');
-  if (dIndex === -1 || parts.length <= dIndex + 1) return u.pathname + u.search + u.hash;
+  if (dIndex === -1 || parts.length <= dIndex + 1) {
+    return u.pathname + u.search + u.hash;
+  }
 
   const prefix = '/' + parts.slice(0, dIndex + 2).join('/');
   u.pathname = `${prefix}/${near}`;
@@ -127,29 +130,18 @@ function buildNearUrl(u: URL, near: number): string {
   return u.pathname + u.search + u.hash;
 }
 
-/** 从事件 target 向上寻找 <a> */
-function findAnchor(target: EventTarget | null): HTMLAnchorElement | null {
-  let el = target as HTMLElement | null;
-  while (el && el !== document.body) {
-    if (el instanceof HTMLAnchorElement) return el;
-    el = el.parentElement;
-  }
-  return null;
-}
-
-/** Scrubber 相关元素：完全放行 */
-const SCRUBBER_SKIP = '.PostStreamScrubber, .Scrubber, .item-scrubber, .PostStream-scrubber';
-
-let attached = false;
+let installed = false;
 
 export default function installDiscussionNavigation() {
-  if (attached) return;
-  attached = true;
+  if (installed) return;
+  installed = true;
 
   app.initializers.add('lady-byron/reading-enhance-navigation', () => {
-    /** 1) 列表项改写（保留 v17 blog 支持 & 搜索页特例） */
+    /**
+     * 1) 列表项改写（首页/标签页列表；搜索页不改，保留“最相关”体验）
+     */
     extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
-      // 搜索页（params.q）不改写，保留“最相关”体验
+      // 搜索页（params.q）不改写
       if ((this as any).attrs?.params?.q) return;
 
       const discussion = (this as any).attrs?.discussion;
@@ -176,7 +168,10 @@ export default function installDiscussionNavigation() {
           if (shouldRedirectDiscussionToBlog(discussion)) {
             href =
               recorded > 1
-                ? app.route('blogArticle.near', { id: discussion.slug(), near: recorded })
+                ? app.route('blogArticle.near', {
+                    id: discussion.slug(),
+                    near: recorded,
+                  })
                 : app.route('blogArticle', { id: discussion.slug() });
           } else {
             href = app.route.discussion(discussion, recorded);
@@ -189,7 +184,9 @@ export default function installDiscussionNavigation() {
       });
     });
 
-    /** 2) Link.view 级别的通用 near 注入（不打 API） */
+    /**
+     * 2) Link.view 级别的通用 near 注入（只用 store，不打 API，不截获点击）
+     */
     extend(Link.prototype as any, 'view', function (vdom: any) {
       const attrs = vdom.attrs || {};
       if (attrs['data-lbRewritten']) return;
@@ -220,7 +217,52 @@ export default function installDiscussionNavigation() {
       vdom.attrs['data-lbRewritten'] = '1';
     });
 
-    /** 3) 兜底补丁：程序化 m.route.set('/d/:id[..]') 时补一个 near */
+    /**
+     * 3) 钩住 app.route.discussion：所有用它生成的帖子链接都加 near（只用 store）
+     */
+    if ((app.route as any).discussion) {
+      const oldDiscussionRoute = (app.route as any).discussion.bind(app.route);
+
+      (app.route as any).discussion = function (discussion: any, near?: number) {
+        try {
+          let effectiveNear = near;
+
+          const id =
+            discussion?.id?.() ??
+            (typeof discussion?.id === 'function' ? discussion.id() : discussion?.id);
+
+          if (!effectiveNear && id) {
+            const storeNear = nearFromStore(String(id));
+            if (storeNear && storeNear > 1) {
+              effectiveNear = storeNear;
+            }
+          }
+
+          const url = oldDiscussionRoute(discussion, effectiveNear);
+
+          // 若没有有效 near，或 URL 已包含显式 near，就保持原样
+          if (!id || !effectiveNear || effectiveNear <= 1) {
+            return url;
+          }
+
+          try {
+            const u = new URL(url, app.forum.attribute('baseUrl'));
+            const explicit = hasExplicitNear(u);
+            if (explicit) return url;
+            const final = buildNearUrl(u, effectiveNear);
+            return final;
+          } catch {
+            return url;
+          }
+        } catch {
+          return oldDiscussionRoute(discussion, near);
+        }
+      };
+    }
+
+    /**
+     * 4) 兜底：程序化 m.route.set('/d/:id[..]') 时补一个 near（只用 store，不打 API）
+     */
     // @ts-ignore
     const oldSet = m.route.set.bind(m.route);
     // @ts-ignore
@@ -253,66 +295,12 @@ export default function installDiscussionNavigation() {
             }
           }
         }
-      } catch {}
+      } catch {
+        // 忽略任何错误，保持原行为
+      }
 
       // @ts-ignore
       return oldSet(path, data, options);
-    };
-
-    /** 4) DOM 级兜底：点击任意 <a> 时，只改 href，不阻断，覆盖导航栏/组件内帖子 */
-    const onDocumentClick = (e: MouseEvent) => {
-      // 已经被别的 handler 阻止的，就不碰
-      if (e.defaultPrevented) return;
-
-      // 只处理左键单击，不处理中键/右键及组合键（避免破坏“新标签页”行为）
-      if (e.button !== 0) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-
-      const a = findAnchor(e.target);
-      if (!a) return;
-
-      // Scrubber / 楼层滑条相关链接：完全放行
-      if (a.matches('.Scrubber-first, .Scrubber-last') || a.closest(SCRUBBER_SKIP)) {
-        return;
-      }
-
-      const hrefAttr = a.getAttribute('href');
-      if (!hrefAttr || !hrefAttr.trim()) return;
-
-      let u: URL;
-      try {
-        u = new URL(a.href, window.location.href);
-      } catch {
-        return;
-      }
-
-      if (!sameOrigin(u)) return;
-
-      const explicit = hasExplicitNear(u);
-      if (explicit) return;
-
-      const id = parseDiscussionIdFromUrl(u);
-      if (!id) return;
-
-      const near = nearFromStore(id);
-      if (!near || near <= 1) return;
-
-      const target = buildNearUrl(u, near);
-
-      // 只修改 href，不 preventDefault；后续由 Flarum 或浏览器按新的 href 导航
-      if (a.href !== target) {
-        a.href = target;
-        a.dataset.lbRewritten = '1';
-      }
-    };
-
-    document.addEventListener('click', onDocumentClick, true);
-
-    // 调试/卸载用
-    (window as any).__lb_reading_nav = {
-      detach() {
-        document.removeEventListener('click', onDocumentClick, true);
-      },
     };
   });
 }
