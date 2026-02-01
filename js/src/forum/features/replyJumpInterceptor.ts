@@ -11,47 +11,51 @@ import PostStream from 'flarum/forum/components/PostStream';
  */
 
 type Token = {
-  did: string | null;
   targetNum: number | null; // 新回复的楼号（来自 POST /posts 响应）
   left: number;             // 可吞次数（冗余入口链路下通常 2~3 次足够）
   expiresAt: number;        // TTL，毫秒级
 };
 
-const token: Token = {
-  did: null,
-  targetNum: null,
-  left: 0,
-  expiresAt: 0,
-};
+/** 按讨论 ID 存储令牌，避免多讨论快速发帖时互相覆盖 */
+const tokens: Record<string, Token> = Object.create(null);
 
 function now() {
   return Date.now();
 }
+
+function getToken(did: string): Token | null {
+  const t = tokens[did];
+  if (!t) return null;
+  if (t.left <= 0 || now() >= t.expiresAt) {
+    delete tokens[did];
+    return null;
+  }
+  return t;
+}
+
 function activeFor(did: string | null): boolean {
-  return (
-    !!did &&
-    token.did === did &&
-    token.left > 0 &&
-    now() < token.expiresAt
-  );
+  return !!did && getToken(did) !== null;
 }
+
 function arm(did: string, targetNum: number | null, ttlMs = 1800, times = 3) {
-  token.did = did;
-  token.targetNum = typeof targetNum === 'number' && targetNum > 0 ? targetNum : null;
-  token.left = Math.max(1, times);
-  token.expiresAt = now() + Math.max(300, ttlMs);
+  tokens[did] = {
+    targetNum: typeof targetNum === 'number' && targetNum > 0 ? targetNum : null,
+    left: Math.max(1, times),
+    expiresAt: now() + Math.max(300, ttlMs),
+  };
 }
-function consume() {
-  if (token.left > 0) token.left -= 1;
-  if (token.left <= 0) {
-    token.did = null;
-    token.targetNum = null;
-    token.expiresAt = 0;
+
+function consume(did: string) {
+  const t = tokens[did];
+  if (!t) return;
+  t.left -= 1;
+  if (t.left <= 0) {
+    delete tokens[did];
   }
 }
 
-function isReplyJump(discussion: any, target: 'reply' | number | any): boolean {
-  // 仅判断“发帖后滚动到底部/新楼”的特征
+function isReplyJump(discussion: any, did: string, target: 'reply' | number | any): boolean {
+  // 仅判断"发帖后滚动到底部/新楼"的特征
   if (!discussion) return false;
 
   if (target === 'reply') return true;
@@ -62,10 +66,11 @@ function isReplyJump(discussion: any, target: 'reply' | number | any): boolean {
       : discussion.attribute?.('lastPostNumber');
 
   if (typeof target === 'number' && target > 0) {
-    // 目标是“末楼或更后”（保守 ≥）
+    // 目标是"末楼或更后"（保守 ≥）
     if (typeof last === 'number' && last > 0 && target >= last) return true;
     // 若有 POST 返回的确切新楼号，用它作判定更稳
-    if (token.targetNum && target >= token.targetNum) return true;
+    const t = getToken(did);
+    if (t?.targetNum && target >= t.targetNum) return true;
   }
 
   return false;
@@ -122,9 +127,9 @@ function installScrollGuards() {
         discussion?.id?.() ??
         (typeof discussion?.id === 'function' ? discussion.id() : null);
 
-      if (activeFor(did) && isReplyJump(discussion, target)) {
-        consume();
-        return; // 吞掉这一次“发帖后自动滚动”
+      if (activeFor(did) && isReplyJump(discussion, did, target)) {
+        consume(did);
+        return; // 吞掉这一次"发帖后自动滚动"
       }
     } catch {}
     return goToOrig.apply(this, [target, ...rest]);
@@ -148,8 +153,8 @@ function installScrollGuards() {
           (state?.visible && state.visible.number) ??
           null;
 
-        if (activeFor(did) && isReplyJump(discussion, target)) {
-          consume();
+        if (activeFor(did) && isReplyJump(discussion, did, target)) {
+          consume(did);
           return;
         }
       } catch {}
@@ -168,8 +173,8 @@ function installScrollGuards() {
           discussion?.id?.() ??
           (typeof discussion?.id === 'function' ? discussion.id() : null);
 
-        if (activeFor(did) && isReplyJump(discussion, n)) {
-          consume();
+        if (activeFor(did) && isReplyJump(discussion, did, n)) {
+          consume(did);
           return;
         }
       } catch {}
@@ -192,8 +197,8 @@ function installScrollGuards() {
             ? state.visible.number
             : i;
 
-        if (activeFor(did) && isReplyJump(discussion, approxTarget)) {
-          consume();
+        if (activeFor(did) && isReplyJump(discussion, did, approxTarget)) {
+          consume(did);
           return;
         }
       } catch {}

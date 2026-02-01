@@ -61,18 +61,15 @@ function extractNearFromUrl(): number | null {
 }
 
 /**
- * 写库（lb_read_post_number；静默失败即可）
+ * 写库（lb_read_post_number）
+ * 返回的 promise 在请求失败时 reject，由调用方决定如何处理。
  */
 function savePosition(discussionId: string, postNumber: number) {
-  return app
-    .request({
-      method: 'POST',
-      url: `${app.forum.attribute('apiUrl')}/ladybyron/reading-position`,
-      body: { discussionId, postNumber },
-    })
-    .catch(() => {
-      // 静默失败，不影响前端体验
-    });
+  return app.request({
+    method: 'POST',
+    url: `${app.forum.attribute('apiUrl')}/ladybyron/reading-position`,
+    body: { discussionId, postNumber },
+  });
 }
 
 /**
@@ -85,9 +82,27 @@ const pendingTimerByDiscussion: Record<string, number> = Object.create(null);
 const pendingCandidateByDiscussion: Record<string, number> = Object.create(null);
 const lastCommittedByDiscussion: Record<string, number> = Object.create(null);
 
+/** 当前活跃的讨论 ID；切换讨论时清理旧条目防止内存泄漏 */
+let activeDiscussionId: string | null = null;
+
+function cleanupStaleEntries(currentId: string) {
+  if (activeDiscussionId && activeDiscussionId !== currentId) {
+    const old = activeDiscussionId;
+    if (pendingTimerByDiscussion[old]) {
+      window.clearTimeout(pendingTimerByDiscussion[old]);
+    }
+    delete pendingTimerByDiscussion[old];
+    delete pendingCandidateByDiscussion[old];
+    delete lastCommittedByDiscussion[old];
+  }
+  activeDiscussionId = currentId;
+}
+
 function scheduleSaveBidirectional(discussion: any, candidate: number) {
   const id: string = discussion.id?.() ?? discussion.id;
   if (!id) return;
+
+  cleanupStaleEntries(id);
 
   // 同一讨论内，如果 candidate 没变，就不重复 schedule
   if (pendingCandidateByDiscussion[id] === candidate) return;
@@ -108,14 +123,19 @@ function scheduleSaveBidirectional(discussion: any, candidate: number) {
     // 和当前记录、上一次成功写入都相同的话，就不写了
     if (toSend === current || toSend === lastCommitted) return;
 
-    savePosition(id, toSend).then(() => {
-      lastCommittedByDiscussion[id] = toSend;
+    savePosition(id, toSend).then(
+      () => {
+        lastCommittedByDiscussion[id] = toSend;
 
-      // 本地模型同步一份，方便导航增强使用
-      if (discussion.attribute && discussion.attribute('lbReadingPosition') !== toSend) {
-        discussion.pushAttributes({ lbReadingPosition: toSend });
+        // 本地模型同步一份，方便导航增强使用
+        if (discussion.attribute && discussion.attribute('lbReadingPosition') !== toSend) {
+          discussion.pushAttributes({ lbReadingPosition: toSend });
+        }
+      },
+      () => {
+        // 请求失败：不更新本地状态，下次滚动时允许重试
       }
-    });
+    );
   }, DEBOUNCE_MS);
 }
 

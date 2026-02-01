@@ -114,12 +114,5 @@ export default function installReadingShortcuts(opts?: Partial<Options>) {
 
     // 捕获阶段优先处理，但不干扰其它键位
     window.addEventListener('keydown', onKeydown, true);
-
-    // 若未来需要卸载，可暴露到全局（调试用）
-    (window as any).__lb_shortcuts = {
-      detach() {
-        window.removeEventListener('keydown', onKeydown, true);
-      },
-    };
   });
 }
