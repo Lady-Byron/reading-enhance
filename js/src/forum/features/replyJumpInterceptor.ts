@@ -1,20 +1,26 @@
 // js/src/forum/features/replyJumpInterceptor.ts
 import app from 'flarum/forum/app';
+import { override } from 'flarum/common/extend';
 import PostStreamState from 'flarum/forum/states/PostStreamState';
-import PostStream from 'flarum/forum/components/PostStream';
 
 /**
  * 精确令牌拦截：
- * - 仅在“提交新回复成功（POST /posts）”后，给对应讨论 did 上一次性令牌（可消费 2~3 次滚动入口）。
- * - 在 goToNumber('reply') / scrollToNumber(newNumber) / triggerScroll等入口，命中当前讨论且目标=回复/末楼时吞掉滚动。
+ * - 仅在"提交新回复成功（POST /api/posts）"后，给对应讨论发一次性令牌。
+ * - 在 goToNumber 入口（调用链顶端）命中当前讨论且目标=回复/末楼时吞掉滚动。
  * - 不影响 near 跳转、点楼号、路由初始定位等其它行为。
+ *
+ * 精简方案：
+ * - 原来补丁 5 处（app.request + goToNumber + triggerScroll + scrollToNumber + scrollToIndex）
+ * - 现在只需 2 处（app.request + override goToNumber），
+ *   因为 goToNumber 是 ReplyComposer 成功后调用的唯一入口，下游方法由它触发。
+ * - 使用 Flarum 标准 override 而非手动原型替换，正确参与扩展调用链。
  */
 
 type Token = {
   did: string | null;
-  targetNum: number | null; // 新回复的楼号（来自 POST /posts 响应）
-  left: number;             // 可吞次数（冗余入口链路下通常 2~3 次足够）
-  expiresAt: number;        // TTL，毫秒级
+  targetNum: number | null;
+  left: number;
+  expiresAt: number;
 };
 
 const token: Token = {
@@ -24,23 +30,22 @@ const token: Token = {
   expiresAt: 0,
 };
 
-function now() {
-  return Date.now();
-}
 function activeFor(did: string | null): boolean {
   return (
     !!did &&
     token.did === did &&
     token.left > 0 &&
-    now() < token.expiresAt
+    Date.now() < token.expiresAt
   );
 }
+
 function arm(did: string, targetNum: number | null, ttlMs = 1800, times = 3) {
   token.did = did;
   token.targetNum = typeof targetNum === 'number' && targetNum > 0 ? targetNum : null;
   token.left = Math.max(1, times);
-  token.expiresAt = now() + Math.max(300, ttlMs);
+  token.expiresAt = Date.now() + Math.max(300, ttlMs);
 }
+
 function consume() {
   if (token.left > 0) token.left -= 1;
   if (token.left <= 0) {
@@ -50,10 +55,8 @@ function consume() {
   }
 }
 
-function isReplyJump(discussion: any, target: 'reply' | number | any): boolean {
-  // 仅判断“发帖后滚动到底部/新楼”的特征
+function isReplyJump(discussion: any, target: any): boolean {
   if (!discussion) return false;
-
   if (target === 'reply') return true;
 
   const last: number | null =
@@ -62,9 +65,7 @@ function isReplyJump(discussion: any, target: 'reply' | number | any): boolean {
       : discussion.attribute?.('lastPostNumber');
 
   if (typeof target === 'number' && target > 0) {
-    // 目标是“末楼或更后”（保守 ≥）
     if (typeof last === 'number' && last > 0 && target >= last) return true;
-    // 若有 POST 返回的确切新楼号，用它作判定更稳
     if (token.targetNum && target >= token.targetNum) return true;
   }
 
@@ -72,7 +73,6 @@ function isReplyJump(discussion: any, target: 'reply' | number | any): boolean {
 }
 
 function installRequestHook() {
-  // 只包一次
   if ((app as any).__lbReqHooked) return;
   (app as any).__lbReqHooked = true;
 
@@ -83,14 +83,10 @@ function installRequestHook() {
     try {
       const method = String(opts?.method || '').toUpperCase();
       const url = String(opts?.url || '');
-      const isCreatePost =
-        method === 'POST' &&
-        /\/posts(?:\?|$|\/)/.test(url); // .../api/posts
-
-      if (!isCreatePost) return p;
+      // #5: 收紧正则，只匹配 Flarum 标准的 POST /api/posts 接口
+      if (method !== 'POST' || !/\/api\/posts(?:\?|$)/.test(url)) return p;
 
       return p.then((res: any) => {
-        // 解析 discussionId 与新楼号
         const did =
           res?.data?.relationships?.discussion?.data?.id ??
           res?.data?.attributes?.discussionId ??
@@ -106,108 +102,34 @@ function installRequestHook() {
         return res;
       });
     } catch {
-      // 出错不影响请求链路
       return p;
     }
   };
 }
 
-function installScrollGuards() {
-  // --- goToNumber(entry)：最早的定位入口 ---
-  const goToOrig = (PostStreamState as any).prototype.goToNumber;
-  (PostStreamState as any).prototype.goToNumber = function (target: any, ...rest: any[]) {
-    try {
-      const discussion = (this as any)?.discussion;
-      const did =
-        discussion?.id?.() ??
-        (typeof discussion?.id === 'function' ? discussion.id() : null);
+export default function installReplyJumpInterceptor() {
+  app.initializers.add('lady-byron/reading-enhance-reply-jump', () => {
+    // 1) 监听"发帖成功"
+    installRequestHook();
 
-      if (activeFor(did) && isReplyJump(discussion, target)) {
-        consume();
-        return; // 吞掉这一次“发帖后自动滚动”
-      }
-    } catch {}
-    return goToOrig.apply(this, [target, ...rest]);
-  };
-
-  // --- PostStream.prototype.triggerScroll：滚动触发（适配不同核心版本） ---
-  const psProto: any = (PostStream as any).prototype;
-
-  if (typeof psProto.triggerScroll === 'function') {
-    const trigOrig = psProto.triggerScroll;
-    psProto.triggerScroll = function (...args: any[]) {
+    // 2) 使用 Flarum 标准 override 拦截调用链顶端
+    // override 回调签名: (original, ...originalArgs)
+    override(PostStreamState.prototype, 'goToNumber', function (original: any, target: any, ...rest: any[]) {
       try {
-        const state = this?.attrs?.state;
-        const discussion = state?.discussion;
+        const discussion = (this as any).discussion;
         const did =
-          discussion?.id?.() ??
-          (typeof discussion?.id === 'function' ? discussion.id() : null);
-        const target =
-          state?.targetPostNumber ??
-          state?.index ??
-          (state?.visible && state.visible.number) ??
-          null;
+          typeof discussion?.id === 'function'
+            ? discussion.id()
+            : discussion?.id;
 
         if (activeFor(did) && isReplyJump(discussion, target)) {
           consume();
           return;
         }
-      } catch {}
-      return trigOrig.apply(this, args);
-    };
-  }
-
-  // --- PostStream.prototype.scrollToNumber：另一实现路径 ---
-  if (typeof psProto.scrollToNumber === 'function') {
-    const toNumOrig = psProto.scrollToNumber;
-    psProto.scrollToNumber = function (n: number, ...rest: any[]) {
-      try {
-        const state = this?.attrs?.state;
-        const discussion = state?.discussion;
-        const did =
-          discussion?.id?.() ??
-          (typeof discussion?.id === 'function' ? discussion.id() : null);
-
-        if (activeFor(did) && isReplyJump(discussion, n)) {
-          consume();
-          return;
-        }
-      } catch {}
-      return toNumOrig.apply(this, [n, ...rest]);
-    };
-  }
-
-  // --- PostStream.prototype.scrollToIndex：极少数路径（保守） ---
-  if (typeof psProto.scrollToIndex === 'function') {
-    const toIdxOrig = psProto.scrollToIndex;
-    psProto.scrollToIndex = function (i: number, ...rest: any[]) {
-      try {
-        const state = this?.attrs?.state;
-        const discussion = state?.discussion;
-        const did =
-          discussion?.id?.() ??
-          (typeof discussion?.id === 'function' ? discussion.id() : null);
-        const approxTarget =
-          state?.visible?.number && typeof state.visible.number === 'number'
-            ? state.visible.number
-            : i;
-
-        if (activeFor(did) && isReplyJump(discussion, approxTarget)) {
-          consume();
-          return;
-        }
-      } catch {}
-      return toIdxOrig.apply(this, [i, ...rest]);
-    };
-  }
-}
-
-export default function installReplyJumpInterceptor() {
-  app.initializers.add('lady-byron/reading-enhance-reply-jump', () => {
-    // 1) 监听“发帖成功”
-    installRequestHook();
-
-    // 2) 拦截“仅限由发帖引发的滚动”
-    installScrollGuards();
+      } catch {
+        // 出错不影响原始行为
+      }
+      return original(target, ...rest);
+    });
   });
 }

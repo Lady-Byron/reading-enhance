@@ -2,7 +2,6 @@
 
 use Flarum\Extend;
 use Flarum\Api\Serializer\BasicDiscussionSerializer;
-use Flarum\Api\Serializer\DiscussionSerializer;
 use Flarum\Discussion\Discussion;
 use Flarum\Discussion\UserState;
 
@@ -19,14 +18,10 @@ return [
         ->cast('lb_read_post_number', 'int')
         ->cast('lb_read_at', 'datetime'),
 
-    // 序列化时带上我们的字段（列表 & 详情）
+    // 序列化时带上阅读位置字段
+    // 只注册在 BasicDiscussionSerializer 上；DiscussionSerializer 继承自它，
+    // Flarum 的 instanceof 检查会让两者都执行此回调，无需重复注册
     (new Extend\ApiSerializer(BasicDiscussionSerializer::class))
-        ->attributes(function ($serializer, Discussion $discussion, array $attributes) {
-            $state = $discussion->stateFor($serializer->getActor());
-            $attributes['lbReadingPosition'] = $state?->lb_read_post_number ?? null;
-            return $attributes;
-        }),
-    (new Extend\ApiSerializer(DiscussionSerializer::class))
         ->attributes(function ($serializer, Discussion $discussion, array $attributes) {
             $state = $discussion->stateFor($serializer->getActor());
             $attributes['lbReadingPosition'] = $state?->lb_read_post_number ?? null;

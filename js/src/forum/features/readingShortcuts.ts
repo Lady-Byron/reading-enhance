@@ -98,12 +98,15 @@ export default function installReadingShortcuts(opts?: Partial<Options>) {
         }
         case 'Shift+J': {
           e.preventDefault(); e.stopPropagation();
-          scrollByAmount(vh, options.smooth);
+          // #2: 与 Shift+D/U 保持一致，扣除固定 header 高度，避免内容被遮挡
+          const downDelta = Math.max(1, vh - offset);
+          scrollByAmount(downDelta, options.smooth);
           break;
         }
         case 'Shift+K': {
           e.preventDefault(); e.stopPropagation();
-          scrollByAmount(-vh, options.smooth);
+          const upDelta = Math.max(1, vh - offset);
+          scrollByAmount(-upDelta, options.smooth);
           break;
         }
         default:
