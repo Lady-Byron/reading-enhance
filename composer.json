@@ -13,10 +13,12 @@
   },
   "extra": {
     "flarum-extension": {
-      "title": "Reading Enhance",
+      "title": "Flop Enhance",
       "category": "feature",
       "icon": {
-        "name": "fas fa-bookmark"
+        "name": "fas fa-bookmark-arrow-up",
+        "backgroundColor": "#5B8C5A",
+        "color": "#fff"
       }
     }
   }
