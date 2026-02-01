@@ -5,6 +5,7 @@ namespace LadyByron\ReadingEnhance\Api\Controller;
 use Flarum\Api\Controller\AbstractShowController;
 use Flarum\Api\Serializer\DiscussionSerializer;
 use Flarum\Discussion\DiscussionRepository;
+use Flarum\Foundation\ValidationException;
 use Flarum\Http\RequestUtil;
 use Illuminate\Support\Arr;
 use Tobscure\JsonApi\Document;
@@ -36,14 +37,18 @@ class SaveReadingPositionController extends AbstractShowController
         $postNumber   = $postNumber   !== null ? (int) $postNumber   : null;
 
         if (!$discussionId || $discussionId <= 0) {
-            // 422：参数无效
-            $document->setMeta(['error' => 'invalid_discussion_id']);
-            return null;
+            throw new ValidationException(['discussionId' => 'Invalid discussion ID.']);
         }
 
         $discussion = $this->discussions->findOrFail($discussionId, $actor);
 
         if ($postNumber !== null && $postNumber > 0) {
+            // 限制 postNumber 不超过讨论的实际最后楼层号
+            $lastPostNumber = $discussion->last_post_number;
+            if ($lastPostNumber && $postNumber > $lastPostNumber) {
+                $postNumber = $lastPostNumber;
+            }
+
             $state = $discussion->stateFor($actor);
             $state->lb_read_post_number = $postNumber;
             $state->lb_read_at = \Illuminate\Support\Carbon::now();

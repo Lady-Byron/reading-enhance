@@ -29,8 +29,8 @@ function shouldRedirectDiscussionToBlog(discussion: any): boolean {
     if (!tag) return false;
     const parent = tag.parent?.() || null;
     return (
-      blogTags.indexOf(tag.id?.()!) !== -1 ||
-      (parent && blogTags.indexOf(parent.id?.()!) !== -1)
+      blogTags.indexOf(tag.id?.() ?? '') !== -1 ||
+      (parent && blogTags.indexOf(parent.id?.() ?? '') !== -1)
     );
   });
 }
@@ -138,12 +138,14 @@ function buildNearUrl(u: URL, near: number): string {
     return u.pathname + u.search + u.hash;
   }
 
+  // 克隆 URL 避免修改调用方的对象
+  const clone = new URL(u.href);
   const prefix = '/' + parts.slice(0, dIndex + 2).join('/');
-  u.pathname = `${prefix}/${near}`;
-  u.searchParams.delete('near');
-  if (u.hash && /^#p\d+$/i.test(u.hash)) u.hash = '';
+  clone.pathname = `${prefix}/${near}`;
+  clone.searchParams.delete('near');
+  if (clone.hash && /^#p\d+$/i.test(clone.hash)) clone.hash = '';
 
-  return u.pathname + u.search + u.hash;
+  return clone.pathname + clone.search + clone.hash;
 }
 
 let installed = false;
@@ -284,22 +286,9 @@ export default function installDiscussionNavigation() {
             }
           }
 
-          const url = oldDiscussionRoute(discussion, effectiveNear);
-
-          // 若没有有效 near，直接返回原 URL
-          if (!id || !effectiveNear || effectiveNear <= 1) {
-            return url;
-          }
-
-          try {
-            const u = new URL(url, app.forum.attribute('baseUrl'));
-            const explicit = hasExplicitNear(u);
-            if (explicit) return url;
-            const final = buildNearUrl(u, effectiveNear);
-            return final;
-          } catch {
-            return url;
-          }
+          // oldDiscussionRoute 已经把 effectiveNear 编入了 URL（/d/:id/:near 格式），
+          // 无需再做 hasExplicitNear 检查或 buildNearUrl 二次改写。
+          return oldDiscussionRoute(discussion, effectiveNear);
         } catch {
           return oldDiscussionRoute(discussion, near);
         }
