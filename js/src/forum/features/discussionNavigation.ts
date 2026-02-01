@@ -74,17 +74,23 @@ export default function installDiscussionNavigation() {
   installed = true;
 
   app.initializers.add('lady-byron/reading-enhance-navigation', () => {
-    /**
-     * 钩住 app.route.discussion —— 所有讨论 URL 生成的唯一收口点。
-     * DiscussionListItem、Link 组件、m.route.set 等均通过此函数生成讨论 URL，
-     * 因此只需在此处注入 near 参数即可覆盖全部场景。
-     *
-     * 原 4 层补丁（DiscussionListItem.view / Link.view / app.route.discussion / m.route.set）
-     * 精简为此单一钩子 + 搜索页抑制，消除 #4 死代码、#9 性能问题、#15 过度补丁。
-     */
-    if (!(app.route as any).discussion) return;
+    const DBG = true; // ← 诊断开关，定位完毕后改为 false
+
+    // ---- 诊断：检查 app.route.discussion 是否存在 ----
+    const hasDiscussionRoute = !!(app.route as any).discussion;
+    if (DBG) {
+      console.debug('[lb-nav] init: app.route.discussion exists?', hasDiscussionRoute);
+      console.debug('[lb-nav] init: typeof app.route =', typeof app.route);
+      console.debug('[lb-nav] init: app.route keys =', Object.keys(app.route as any));
+    }
+
+    if (!hasDiscussionRoute) {
+      if (DBG) console.warn('[lb-nav] app.route.discussion NOT found — hook aborted');
+      return;
+    }
 
     const origDiscussionRoute = (app.route as any).discussion.bind(app.route);
+    if (DBG) console.debug('[lb-nav] hook installed, origDiscussionRoute =', origDiscussionRoute);
 
     (app.route as any).discussion = function (discussion: any, near?: number) {
       try {
@@ -100,6 +106,15 @@ export default function installDiscussionNavigation() {
 
           if (id) {
             const stored = effectiveNearFromStore(String(id));
+
+            if (DBG) {
+              console.debug('[lb-nav] route.discussion called', {
+                id,
+                nearArg: near,
+                stored,
+                discussion,
+              });
+            }
 
             // v17 blog 兼容：需重定向到 blog 路由时生成 blogArticle.near
             if (stored && stored > 1 && shouldRedirectDiscussionToBlog(discussion)) {
@@ -118,18 +133,18 @@ export default function installDiscussionNavigation() {
               near = stored;
             }
           }
+        } else if (DBG) {
+          console.debug('[lb-nav] route.discussion called with explicit near', { near });
         }
-      } catch {
-        // 出错时保持原始行为
+      } catch (e) {
+        if (DBG) console.error('[lb-nav] hook error', e);
       }
 
-      return origDiscussionRoute(discussion, near);
+      const result = origDiscussionRoute(discussion, near);
+      if (DBG) console.debug('[lb-nav] final URL =', result, '(near =', near, ')');
+      return result;
     };
 
-    /**
-     * 搜索页抑制：搜索结果的讨论链接应指向"最相关"帖子，不注入阅读位置。
-     * 通过 override 在搜索列表渲染期间设置抑制标志。
-     */
     override(DiscussionListItem.prototype, 'view', function (original: any) {
       if ((this as any).attrs?.params?.q) {
         _suppressNear = true;
@@ -141,5 +156,31 @@ export default function installDiscussionNavigation() {
       }
       return original();
     });
+
+    // ---- 诊断：暴露到 window 供控制台手动检查 ----
+    if (DBG) {
+      (window as any).__lbDebug = {
+        effectiveNearFromStore,
+        dumpStore() {
+          const all = app.store.all('discussions');
+          return all.map((d: any) => ({
+            id: d.id(),
+            slug: d.slug?.(),
+            lbReadingPosition: d.attribute('lbReadingPosition'),
+            lastReadPostNumber: d.lastReadPostNumber?.() ?? d.attribute('lastReadPostNumber'),
+          }));
+        },
+        testRoute(discussionId: string) {
+          const d = app.store.getById('discussions', discussionId);
+          if (!d) return 'discussion not in store';
+          return {
+            near: effectiveNearFromStore(discussionId),
+            url: origDiscussionRoute(d),
+            urlWithNear: origDiscussionRoute(d, effectiveNearFromStore(discussionId)),
+          };
+        },
+      };
+      console.debug('[lb-nav] window.__lbDebug ready — try __lbDebug.dumpStore() or __lbDebug.testRoute("123")');
+    }
   });
 }

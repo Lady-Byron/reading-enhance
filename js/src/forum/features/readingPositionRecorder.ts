@@ -89,14 +89,17 @@ export default function installReadingPositionRecorder() {
   installed = true;
 
   app.initializers.add('lady-byron/reading-enhance-recorder', () => {
-    // 直接扩展 DiscussionPage.positionChanged — Flarum 在 PostStream 滚动时调用此方法
-    // 签名: positionChanged(startNumber: number, endNumber: number): void
-    // extend 回调接收 (returnValue, ...originalArgs)，positionChanged 返回 void
+    const DBG = true; // ← 诊断开关
+
+    if (DBG) console.debug('[lb-rec] extending DiscussionPage.positionChanged');
+
     extend(DiscussionPage.prototype, 'positionChanged', function (_ret: void, startNumber: number) {
       if (!app.session.user) return;
 
       const discussion = (this as any).discussion;
       if (!discussion) return;
+
+      if (DBG) console.debug('[lb-rec] positionChanged fired', { startNumber, discussion: discussion.id?.() });
 
       if (typeof startNumber === 'number' && startNumber > 0) {
         scheduleSave(discussion, startNumber);
