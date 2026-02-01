@@ -1,10 +1,12 @@
 // js/src/forum/features/discussionNavigation.ts
 import app from 'flarum/forum/app';
-import { override } from 'flarum/common/extend';
+import { extend } from 'flarum/common/extend';
 import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
 
 // @ts-ignore
 declare const flarum: any;
+
+const DBG = true; // ← 诊断开关，定位完毕后改为 false
 
 /** ---- v17 blog 路由判定 ---- */
 function shouldRedirectDiscussionToBlog(discussion: any): boolean {
@@ -25,7 +27,6 @@ function shouldRedirectDiscussionToBlog(discussion: any): boolean {
 
   return tags.some((tag: any) => {
     if (!tag) return false;
-    // #12: 用安全取值替代矛盾的 ?.()! 写法
     const tagId = tag.id?.() ?? tag.id ?? null;
     const parent = tag.parent?.() || null;
     const parentId = parent ? (parent.id?.() ?? parent.id ?? null) : null;
@@ -37,9 +38,7 @@ function shouldRedirectDiscussionToBlog(discussion: any): boolean {
 }
 
 /**
- * #14: 提取公共 helper — 从 store 读取有效阅读位置
- * - lbReadingPosition 存在（哪怕 =1）→ 扩展已接管：>1 返回值，<=1 返回 null（从首楼开始）
- * - lbReadingPosition 不存在 → fallback 到 lastReadPostNumber (>1)
+ * 从 store 读取有效阅读位置
  */
 function effectiveNearFromStore(id: string): number | null {
   const d = app.store.getById('discussions', id);
@@ -64,8 +63,32 @@ function effectiveNearFromStore(id: string): number | null {
   return typeof rawLast === 'number' && rawLast > 1 ? rawLast : null;
 }
 
-// 搜索页抑制标志：在搜索列表渲染期间禁止注入 near，保持"最相关"语义
-let _suppressNear = false;
+/**
+ * 递归遍历 VDOM，把匹配 /d/{slug} 的 href 改写为 /d/{slug}/{near}。
+ * 只改还没有 near 的链接（末尾不是 /数字 的）。
+ */
+function patchDiscussionLinks(vnode: any, near: number, replacement?: string): void {
+  if (!vnode || typeof vnode !== 'object') return;
+
+  if (Array.isArray(vnode)) {
+    for (let i = 0; i < vnode.length; i++) patchDiscussionLinks(vnode[i], near, replacement);
+    return;
+  }
+
+  const href: string | undefined = vnode.attrs?.href;
+  if (typeof href === 'string' && /^\/d\/[^/]+$/.test(href)) {
+    vnode.attrs.href = replacement ?? href + '/' + near;
+    if (DBG) console.debug('[lb-nav] patched list-item link', { from: href, to: vnode.attrs.href });
+  }
+
+  if (vnode.children) {
+    if (Array.isArray(vnode.children)) {
+      for (let i = 0; i < vnode.children.length; i++) patchDiscussionLinks(vnode.children[i], near, replacement);
+    } else {
+      patchDiscussionLinks(vnode.children, near, replacement);
+    }
+  }
+}
 
 let installed = false;
 
@@ -74,90 +97,87 @@ export default function installDiscussionNavigation() {
   installed = true;
 
   app.initializers.add('lady-byron/reading-enhance-navigation', () => {
-    const DBG = true; // ← 诊断开关，定位完毕后改为 false
+    // ================================================================
+    //  Layer A: 钩住 app.route.discussion
+    //  覆盖 positionChanged URL 重写 / Link 组件 / 以及其它经由此函数的调用
+    // ================================================================
+    if ((app.route as any).discussion) {
+      const origDiscussionRoute = (app.route as any).discussion.bind(app.route);
+      if (DBG) console.debug('[lb-nav] hooking app.route.discussion');
 
-    // ---- 诊断：检查 app.route.discussion 是否存在 ----
-    const hasDiscussionRoute = !!(app.route as any).discussion;
-    if (DBG) {
-      console.debug('[lb-nav] init: app.route.discussion exists?', hasDiscussionRoute);
-      console.debug('[lb-nav] init: typeof app.route =', typeof app.route);
-      console.debug('[lb-nav] init: app.route keys =', Object.keys(app.route as any));
-    }
+      (app.route as any).discussion = function (discussion: any, near?: number) {
+        try {
+          if (!near) {
+            const id =
+              typeof discussion?.id === 'function'
+                ? discussion.id()
+                : discussion?.id;
 
-    if (!hasDiscussionRoute) {
-      if (DBG) console.warn('[lb-nav] app.route.discussion NOT found — hook aborted');
-      return;
-    }
+            if (id) {
+              const stored = effectiveNearFromStore(String(id));
 
-    const origDiscussionRoute = (app.route as any).discussion.bind(app.route);
-    if (DBG) console.debug('[lb-nav] hook installed, origDiscussionRoute =', origDiscussionRoute);
+              if (stored && stored > 1 && shouldRedirectDiscussionToBlog(discussion)) {
+                try {
+                  const slug =
+                    typeof discussion.slug === 'function'
+                      ? discussion.slug()
+                      : discussion.slug;
+                  return app.route('blogArticle.near', { id: slug, near: stored });
+                } catch {
+                  // blogArticle.near 路由不存在时 fallback
+                }
+              }
 
-    (app.route as any).discussion = function (discussion: any, near?: number) {
-      try {
-        if (_suppressNear) {
-          return origDiscussionRoute(discussion, near);
-        }
-
-        if (!near) {
-          const id =
-            typeof discussion?.id === 'function'
-              ? discussion.id()
-              : discussion?.id;
-
-          if (id) {
-            const stored = effectiveNearFromStore(String(id));
-
-            if (DBG) {
-              console.debug('[lb-nav] route.discussion called', {
-                id,
-                nearArg: near,
-                stored,
-                discussion,
-              });
-            }
-
-            // v17 blog 兼容：需重定向到 blog 路由时生成 blogArticle.near
-            if (stored && stored > 1 && shouldRedirectDiscussionToBlog(discussion)) {
-              try {
-                const slug =
-                  typeof discussion.slug === 'function'
-                    ? discussion.slug()
-                    : discussion.slug;
-                return app.route('blogArticle.near', { id: slug, near: stored });
-              } catch {
-                // blogArticle.near 路由不存在时 fallback
+              if (stored) {
+                near = stored;
               }
             }
-
-            if (stored) {
-              near = stored;
-            }
           }
-        } else if (DBG) {
-          console.debug('[lb-nav] route.discussion called with explicit near', { near });
+        } catch {
+          // 出错时保持原始行为
         }
-      } catch (e) {
-        if (DBG) console.error('[lb-nav] hook error', e);
-      }
 
-      const result = origDiscussionRoute(discussion, near);
-      if (DBG) console.debug('[lb-nav] final URL =', result, '(near =', near, ')');
-      return result;
-    };
+        return origDiscussionRoute(discussion, near);
+      };
+    } else if (DBG) {
+      console.warn('[lb-nav] app.route.discussion NOT found — Layer A skipped');
+    }
 
-    override(DiscussionListItem.prototype, 'view', function (original: any) {
-      if ((this as any).attrs?.params?.q) {
-        _suppressNear = true;
+    // ================================================================
+    //  Layer B: 补丁 DiscussionListItem 列表项链接
+    //  Flarum 1.8 的 DiscussionListItem 直接调用 app.route('discussion',{id:...})
+    //  而非 app.route.discussion()，Layer A 覆盖不到这里。
+    //  extend 在原 view() 之后执行，拿到已渲染的 VDOM，找到讨论链接并补上 /near。
+    // ================================================================
+    extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
+      // 搜索结果不改写，保持"最相关"语义
+      if ((this as any).attrs?.params?.q) return;
+
+      const discussion = (this as any).attrs?.discussion;
+      if (!discussion) return;
+
+      const id = typeof discussion.id === 'function' ? discussion.id() : discussion.id;
+      if (!id) return;
+
+      const near = effectiveNearFromStore(String(id));
+      if (!near || near <= 1) return;
+
+      // Blog 兼容：如需重定向到 blog 路由则替换整个 URL
+      if (shouldRedirectDiscussionToBlog(discussion)) {
         try {
-          return original();
-        } finally {
-          _suppressNear = false;
+          const slug = typeof discussion.slug === 'function' ? discussion.slug() : discussion.slug;
+          const blogUrl = app.route('blogArticle.near', { id: slug, near });
+          patchDiscussionLinks(vdom, near, blogUrl);
+          return;
+        } catch {
+          // fallback 到普通讨论链接补丁
         }
       }
-      return original();
+
+      patchDiscussionLinks(vdom, near);
     });
 
-    // ---- 诊断：暴露到 window 供控制台手动检查 ----
+    // ---- 诊断工具 ----
     if (DBG) {
       (window as any).__lbDebug = {
         effectiveNearFromStore,
@@ -170,17 +190,8 @@ export default function installDiscussionNavigation() {
             lastReadPostNumber: d.lastReadPostNumber?.() ?? d.attribute('lastReadPostNumber'),
           }));
         },
-        testRoute(discussionId: string) {
-          const d = app.store.getById('discussions', discussionId);
-          if (!d) return 'discussion not in store';
-          return {
-            near: effectiveNearFromStore(discussionId),
-            url: origDiscussionRoute(d),
-            urlWithNear: origDiscussionRoute(d, effectiveNearFromStore(discussionId)),
-          };
-        },
       };
-      console.debug('[lb-nav] window.__lbDebug ready — try __lbDebug.dumpStore() or __lbDebug.testRoute("123")');
+      console.debug('[lb-nav] __lbDebug ready');
     }
   });
 }
