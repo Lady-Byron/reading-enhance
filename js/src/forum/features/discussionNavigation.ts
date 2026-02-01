@@ -1,14 +1,12 @@
 // js/src/forum/features/discussionNavigation.ts
 import app from 'flarum/forum/app';
-import { extend } from 'flarum/common/extend';
+import { override } from 'flarum/common/extend';
 import DiscussionListItem from 'flarum/forum/components/DiscussionListItem';
-import Link from 'flarum/common/components/Link';
 
-// flarum.extensions 全局：用于检测 v17 blog
 // @ts-ignore
 declare const flarum: any;
 
-/** ---- v17 blog 路由判定（保持与你原来实现一致） ---- */
+/** ---- v17 blog 路由判定 ---- */
 function shouldRedirectDiscussionToBlog(discussion: any): boolean {
   try {
     if (!flarum || !('v17development-blog' in flarum.extensions)) return false;
@@ -27,85 +25,34 @@ function shouldRedirectDiscussionToBlog(discussion: any): boolean {
 
   return tags.some((tag: any) => {
     if (!tag) return false;
+    // #12: 用安全取值替代矛盾的 ?.()! 写法
+    const tagId = tag.id?.() ?? tag.id ?? null;
     const parent = tag.parent?.() || null;
+    const parentId = parent ? (parent.id?.() ?? parent.id ?? null) : null;
     return (
-      blogTags.indexOf(tag.id?.()!) !== -1 ||
-      (parent && blogTags.indexOf(parent.id?.()!) !== -1)
+      (tagId != null && blogTags.indexOf(tagId) !== -1) ||
+      (parentId != null && blogTags.indexOf(parentId) !== -1)
     );
   });
 }
 
-/** ---- URL / id 工具 ---- */
-
-function sameOrigin(u: URL): boolean {
-  try {
-    const base = new URL(app.forum.attribute('baseUrl'));
-    return u.origin === base.origin;
-  } catch {
-    return false;
-  }
-}
-
-function parseDiscussionIdFromUrl(u: URL): string | null {
-  const parts = u.pathname.split('/').filter(Boolean);
-  const dIndex = parts.indexOf('d');
-  if (dIndex === -1 || parts.length <= dIndex + 1) return null;
-  const idPart = parts[dIndex + 1];
-  const match = /^(\d+)/.exec(idPart);
-  return match ? match[1] : null;
-}
-
-/** 显式 near 识别：数字 | 'first' | 'last' | #p123 | #reply/#last/#first */
-function hasExplicitNear(u: URL): number | 'first' | 'last' | null {
-  const parts = u.pathname.split('/').filter(Boolean);
-  const dIndex = parts.indexOf('d');
-
-  // /d/:id/:near（数字）
-  if (dIndex !== -1 && parts.length > dIndex + 2) {
-    const n = parseInt(parts[dIndex + 2], 10);
-    if (!Number.isNaN(n) && n > 0) return n; // near=1 也视为显式
-  }
-
-  // ?near=（数字 | first | last）
-  const nearRaw = u.searchParams.get('near');
-  if (nearRaw) {
-    const n = parseInt(nearRaw, 10);
-    if (!Number.isNaN(n) && n > 0) return n;
-    const s = nearRaw.toLowerCase();
-    if (s === 'first') return 'first';
-    if (s === 'last') return 'last';
-  }
-
-  // 锚点：#p123 / #reply / #last / #first
-  if (u.hash) {
-    const h = u.hash.toLowerCase();
-    if (/^#p\d+$/.test(h)) return parseInt(h.slice(2), 10);
-    if (h === '#reply' || h === '#last') return 'last';
-    if (h === '#first') return 'first';
-  }
-
-  return null;
-}
-
 /**
- * 从前端 store 读取阅读位置：
- * - 若 lbReadingPosition 存在（哪怕是 1），视为“扩展已接管”，完全覆盖 lastReadPostNumber
- * - 若 lb 不存在，才 fallback 到 lastReadPostNumber (>1)
+ * #14: 提取公共 helper — 从 store 读取有效阅读位置
+ * - lbReadingPosition 存在（哪怕 =1）→ 扩展已接管：>1 返回值，<=1 返回 null（从首楼开始）
+ * - lbReadingPosition 不存在 → fallback 到 lastReadPostNumber (>1)
  */
-type ReadingPositionSource = 'lb' | 'last' | null;
-interface ReadingPosition {
-  pos: number | null;
-  source: ReadingPositionSource;
-}
-
-function readingPositionFromStore(id: string): ReadingPosition {
+function effectiveNearFromStore(id: string): number | null {
   const d = app.store.getById('discussions', id);
-  if (!d) return { pos: null, source: null };
+  if (!d) return null;
 
   const rawLb =
     typeof d.attribute === 'function'
       ? d.attribute('lbReadingPosition')
       : (d as any).lbReadingPosition;
+
+  if (typeof rawLb === 'number') {
+    return rawLb > 1 ? rawLb : null;
+  }
 
   const rawLast =
     typeof d.lastReadPostNumber === 'function'
@@ -114,37 +61,11 @@ function readingPositionFromStore(id: string): ReadingPosition {
       ? d.attribute('lastReadPostNumber')
       : null;
 
-  const hasLb = typeof rawLb === 'number';
-  const lbNum = hasLb ? (rawLb as number) : null;
-  const lastNum = typeof rawLast === 'number' ? (rawLast as number) : null;
-
-  if (hasLb) {
-    // 只要 lb 存在（即使是 1），就视为扩展接管，完全忽略 lastRead
-    return { pos: lbNum, source: 'lb' };
-  }
-
-  if (lastNum && lastNum > 1) {
-    return { pos: lastNum, source: 'last' };
-  }
-
-  return { pos: null, source: null };
+  return typeof rawLast === 'number' && rawLast > 1 ? rawLast : null;
 }
 
-/** 把 /d/:id[/slug] 改成 /d/:id[/slug]/:near（移除 ?near，去掉 #p123） */
-function buildNearUrl(u: URL, near: number): string {
-  const parts = u.pathname.split('/').filter(Boolean);
-  const dIndex = parts.indexOf('d');
-  if (dIndex === -1 || parts.length <= dIndex + 1) {
-    return u.pathname + u.search + u.hash;
-  }
-
-  const prefix = '/' + parts.slice(0, dIndex + 2).join('/');
-  u.pathname = `${prefix}/${near}`;
-  u.searchParams.delete('near');
-  if (u.hash && /^#p\d+$/i.test(u.hash)) u.hash = '';
-
-  return u.pathname + u.search + u.hash;
-}
+// 搜索页抑制标志：在搜索列表渲染期间禁止注入 near，保持"最相关"语义
+let _suppressNear = false;
 
 let installed = false;
 
@@ -154,212 +75,71 @@ export default function installDiscussionNavigation() {
 
   app.initializers.add('lady-byron/reading-enhance-navigation', () => {
     /**
-     * 1) 列表项改写（首页/标签页列表；搜索页不改，保留“最相关”体验）
-     *    这里只用 lbReadingPosition 且只在 >1 时改写，语义就是“从记录楼层继续看”
+     * 钩住 app.route.discussion —— 所有讨论 URL 生成的唯一收口点。
+     * DiscussionListItem、Link 组件、m.route.set 等均通过此函数生成讨论 URL，
+     * 因此只需在此处注入 near 参数即可覆盖全部场景。
+     *
+     * 原 4 层补丁（DiscussionListItem.view / Link.view / app.route.discussion / m.route.set）
+     * 精简为此单一钩子 + 搜索页抑制，消除 #4 死代码、#9 性能问题、#15 过度补丁。
      */
-    extend(DiscussionListItem.prototype, 'view', function (vdom: any) {
-      // 搜索页（params.q）不改写
-      if ((this as any).attrs?.params?.q) return;
+    if (!(app.route as any).discussion) return;
 
-      const discussion = (this as any).attrs?.discussion;
-      if (!discussion) return;
+    const origDiscussionRoute = (app.route as any).discussion.bind(app.route);
 
-      const recorded: number | null = discussion.attribute('lbReadingPosition') ?? null;
-      if (!recorded || recorded <= 1) return;
-
-      (vdom.children as any[]).forEach((child: any) => {
-        if (
-          !child ||
-          !child.attrs ||
-          !child.attrs.className ||
-          child.attrs.className.indexOf('DiscussionListItem-content') === -1
-        ) {
-          return;
-        }
-
-        (child.children as any[]).forEach((sub: any) => {
-          if (!sub || sub.tag !== Link) return;
-
-          let href: string;
-
-          if (shouldRedirectDiscussionToBlog(discussion)) {
-            href =
-              recorded > 1
-                ? app.route('blogArticle.near', {
-                    id: discussion.slug(),
-                    near: recorded,
-                  })
-                : app.route('blogArticle', { id: discussion.slug() });
-          } else {
-            href = app.route.discussion(discussion, recorded);
-          }
-
-          sub.attrs = sub.attrs || {};
-          sub.attrs.href = href;
-          sub.attrs['data-lbRewritten'] = '1';
-        });
-      });
-    });
-
-    /**
-     * 2) Link.view 级别的通用 near 注入（只用 store，不打 API，不截获点击）
-     *    - 若 lb 存在：
-     *        lb > 1 → 用 lb
-     *        lb <= 1 → 明确表示“从首楼开始”，不再 fallback 到 lastRead
-     *    - 若 lb 不存在：
-     *        lastRead > 1 → 用 lastRead
-     */
-    extend(Link.prototype as any, 'view', function (vdom: any) {
-      const attrs = vdom.attrs || {};
-      if (attrs['data-lbRewritten']) return;
-
-      const href: string | undefined = attrs.href;
-      if (typeof href !== 'string' || !href.trim()) return;
-
-      let u: URL;
+    (app.route as any).discussion = function (discussion: any, near?: number) {
       try {
-        u = new URL(href, app.forum.attribute('baseUrl'));
-      } catch {
-        return;
-      }
-
-      if (!sameOrigin(u)) return;
-
-      const explicit = hasExplicitNear(u);
-      if (explicit) return;
-
-      const id = parseDiscussionIdFromUrl(u);
-      if (!id) return;
-
-      const rp = readingPositionFromStore(id);
-
-      let near: number | null = null;
-
-      if (rp.source === 'lb') {
-        // 扩展已接管：lb > 1 才加 /near；lb <= 1 表示“从首楼开始”，不加 /1，也不看 lastRead
-        if (rp.pos && rp.pos > 1) {
-          near = rp.pos;
+        if (_suppressNear) {
+          return origDiscussionRoute(discussion, near);
         }
-      } else if (rp.source === 'last') {
-        // 没有 lb 时，才使用 lastRead > 1
-        if (rp.pos && rp.pos > 1) {
-          near = rp.pos;
-        }
-      }
 
-      if (!near || near <= 1) return;
-
-      const target = buildNearUrl(u, near);
-      vdom.attrs.href = target;
-      vdom.attrs['data-lbRewritten'] = '1';
-    });
-
-    /**
-     * 3) 钩住 app.route.discussion：所有用它生成的帖子链接都加 near（只用 store）
-     *    - 若调用方显式传了 near 参数，则尊重调用方
-     *    - 否则用 readingPositionFromStore 的结果
-     */
-    if ((app.route as any).discussion) {
-      const oldDiscussionRoute = (app.route as any).discussion.bind(app.route);
-
-      (app.route as any).discussion = function (discussion: any, near?: number) {
-        try {
-          let effectiveNear = near;
-
+        if (!near) {
           const id =
-            discussion?.id?.() ??
-            (typeof discussion?.id === 'function' ? discussion.id() : discussion?.id);
+            typeof discussion?.id === 'function'
+              ? discussion.id()
+              : discussion?.id;
 
-          if (!effectiveNear && id) {
-            const rp = readingPositionFromStore(String(id));
+          if (id) {
+            const stored = effectiveNearFromStore(String(id));
 
-            if (rp.source === 'lb') {
-              if (rp.pos && rp.pos > 1) {
-                effectiveNear = rp.pos;
-              }
-            } else if (rp.source === 'last') {
-              if (rp.pos && rp.pos > 1) {
-                effectiveNear = rp.pos;
+            // v17 blog 兼容：需重定向到 blog 路由时生成 blogArticle.near
+            if (stored && stored > 1 && shouldRedirectDiscussionToBlog(discussion)) {
+              try {
+                const slug =
+                  typeof discussion.slug === 'function'
+                    ? discussion.slug()
+                    : discussion.slug;
+                return app.route('blogArticle.near', { id: slug, near: stored });
+              } catch {
+                // blogArticle.near 路由不存在时 fallback
               }
             }
-          }
 
-          const url = oldDiscussionRoute(discussion, effectiveNear);
-
-          // 若没有有效 near，直接返回原 URL
-          if (!id || !effectiveNear || effectiveNear <= 1) {
-            return url;
-          }
-
-          try {
-            const u = new URL(url, app.forum.attribute('baseUrl'));
-            const explicit = hasExplicitNear(u);
-            if (explicit) return url;
-            const final = buildNearUrl(u, effectiveNear);
-            return final;
-          } catch {
-            return url;
-          }
-        } catch {
-          return oldDiscussionRoute(discussion, near);
-        }
-      };
-    }
-
-    /**
-     * 4) 兜底：程序化 m.route.set('/d/:id[..]') 时补一个 near（只用 store，不打 API）
-     *    逻辑同上：lb 优先，lb=1 表示“首楼”，不再 fallback 到 lastRead
-     */
-    // @ts-ignore
-    const oldSet = m.route.set.bind(m.route);
-    // @ts-ignore
-    m.route.set = function (path: string, data?: any, options?: any) {
-      try {
-        if (typeof path === 'string') {
-          const url = new URL(path, window.location.origin);
-          const parts = url.pathname.split('/').filter(Boolean);
-          const dIndex = parts.indexOf('d');
-
-          if (dIndex !== -1 && parts.length > dIndex + 1) {
-            const hasNearPath =
-              parts.length > dIndex + 2 && /^\d+$/.test(parts[dIndex + 2]);
-            const hasNearQuery = url.searchParams.has('near'); // near=first/last 也算显式
-
-            if (!hasNearPath && !hasNearQuery) {
-              const idPart = parts[dIndex + 1];
-              const idMatch = /^(\d+)/.exec(idPart);
-              const id = idMatch ? idMatch[1] : null;
-
-              if (id) {
-                const rp = readingPositionFromStore(id);
-                let near: number | null = null;
-
-                if (rp.source === 'lb') {
-                  if (rp.pos && rp.pos > 1) {
-                    near = rp.pos;
-                  }
-                } else if (rp.source === 'last') {
-                  if (rp.pos && rp.pos > 1) {
-                    near = rp.pos;
-                  }
-                }
-
-                if (near && near > 1) {
-                  const prefix = '/' + parts.slice(0, dIndex + 2).join('/');
-                  url.pathname = `${prefix}/${near}`;
-                  url.searchParams.delete('near');
-                  path = url.pathname + url.search + url.hash;
-                }
-              }
+            if (stored) {
+              near = stored;
             }
           }
         }
       } catch {
-        // 忽略任何错误，保持原行为
+        // 出错时保持原始行为
       }
 
-      // @ts-ignore
-      return oldSet(path, data, options);
+      return origDiscussionRoute(discussion, near);
     };
+
+    /**
+     * 搜索页抑制：搜索结果的讨论链接应指向"最相关"帖子，不注入阅读位置。
+     * 通过 override 在搜索列表渲染期间设置抑制标志。
+     */
+    override(DiscussionListItem.prototype, 'view', function (original: any) {
+      if ((this as any).attrs?.params?.q) {
+        _suppressNear = true;
+        try {
+          return original();
+        } finally {
+          _suppressNear = false;
+        }
+      }
+      return original();
+    });
   });
 }
