@@ -16,7 +16,7 @@
       "title": "Flop Enhance",
       "category": "feature",
       "icon": {
-        "name": "fas fa-bookmark-arrow-up",
+        "name": "fas fa-book-arrow-up",
         "backgroundColor": "#5B8C5A",
         "color": "#fff"
       }
